@@ -48,7 +48,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+
+import static org.apache.hadoop.conf.StorageUnit.BYTES;
+import static org.apache.hadoop.conf.StorageUnit.GB;
+import static org.apache.hadoop.conf.StorageUnit.KB;
+import static org.apache.hadoop.conf.StorageUnit.MB;
+import static org.apache.hadoop.conf.StorageUnit.TB;
+import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.*;
 import static org.junit.Assert.assertArrayEquals;
 
@@ -56,7 +64,6 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration.IntegerRanges;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.alias.CredentialProvider;
 import org.apache.hadoop.security.alias.CredentialProviderFactory;
@@ -69,14 +76,19 @@ import org.apache.log4j.AppenderSkeleton;
 import org.apache.log4j.Logger;
 import org.apache.log4j.spi.LoggingEvent;
 import org.hamcrest.CoreMatchers;
+import org.junit.rules.ExpectedException;
 import org.mockito.Mockito;
 
 public class TestConfiguration {
 
+  @Rule
+  public ExpectedException thrown= ExpectedException.none();
   private static final double DOUBLE_DELTA = 0.000000001f;
   private Configuration conf;
   final static String CONFIG = new File("./test-config-TestConfiguration.xml").getAbsolutePath();
   final static String CONFIG2 = new File("./test-config2-TestConfiguration.xml").getAbsolutePath();
+  final static String CONFIG_CORE = new File("./core-site.xml")
+      .getAbsolutePath();
   final static String CONFIG_FOR_ENUM = new File("./test-config-enum-TestConfiguration.xml").getAbsolutePath();
   final static String CONFIG_FOR_URI = "file://"
       + new File("./test-config-uri-TestConfiguration.xml").getAbsolutePath();
@@ -114,6 +126,7 @@ public class TestConfiguration {
     new File(new URI(CONFIG_FOR_URI)).delete();
     new File(CONFIG_MULTI_BYTE).delete();
     new File(CONFIG_MULTI_BYTE_SAVED).delete();
+    new File(CONFIG_CORE).delete();
   }
 
   private void startConfig() throws IOException{
@@ -382,11 +395,9 @@ public class TestConfiguration {
       Configuration conf = new Configuration(false);
       conf.addResource(new Path(CONFIG_MULTI_BYTE));
       assertEquals(value, conf.get(name));
-      FileOutputStream fos = new FileOutputStream(CONFIG_MULTI_BYTE_SAVED);
-      try {
+      try (FileOutputStream fos =
+               new FileOutputStream(CONFIG_MULTI_BYTE_SAVED)) {
         conf.writeXml(fos);
-      } finally {
-        IOUtils.closeStream(fos);
       }
 
       conf = new Configuration(false);
@@ -1326,6 +1337,71 @@ public class TestConfiguration {
   }
 
   @Test
+  public void testStorageUnit() {
+    final String key = "valid.key";
+    final String nonKey = "not.a.key";
+    Configuration conf = new Configuration(false);
+
+    conf.setStorageSize(key, 10, MB);
+    // This call returns the value specified in the Key as a double in MBs.
+    assertThat(conf.getStorageSize(key, "1GB", MB),
+        is(10.0));
+
+    // Since this key is missing, This call converts the default value of  1GB
+    // to MBs are returns that value.
+    assertThat(conf.getStorageSize(nonKey, "1GB", MB),
+        is(1024.0));
+
+
+    conf.setStorageSize(key, 1024, BYTES);
+    assertThat(conf.getStorageSize(key, 100, KB), is(1.0));
+
+    assertThat(conf.getStorageSize(nonKey, 100.0, KB), is(100.0));
+
+    // We try out different kind of String formats to see if they work and
+    // during read, we also try to read using a different Storage Units.
+    conf.setStrings(key, "1TB");
+    assertThat(conf.getStorageSize(key, "1PB", GB), is(1024.0));
+
+    conf.setStrings(key, "1bytes");
+    assertThat(conf.getStorageSize(key, "1PB", KB), is(0.001));
+
+    conf.setStrings(key, "2048b");
+    assertThat(conf.getStorageSize(key, "1PB", KB), is(2.0));
+
+    conf.setStrings(key, "64 GB");
+    assertThat(conf.getStorageSize(key, "1PB", GB), is(64.0));
+
+    // Match the parsing patterns of getLongBytes, which takes single char
+    // suffix.
+    conf.setStrings(key, "1T");
+    assertThat(conf.getStorageSize(key, "1GB", TB), is(1.0));
+
+    conf.setStrings(key, "1k");
+    assertThat(conf.getStorageSize(key, "1GB", KB), is(1.0));
+
+    conf.setStrings(key, "10m");
+    assertThat(conf.getStorageSize(key, "1GB", MB), is(10.0));
+
+
+
+    // Missing format specification, this should throw.
+    conf.setStrings(key, "100");
+    thrown.expect(IllegalArgumentException.class);
+    conf.getStorageSize(key, "1PB", GB);
+
+    // illegal format specification, this should throw.
+    conf.setStrings(key, "1HB");
+    thrown.expect(IllegalArgumentException.class);
+    conf.getStorageSize(key, "1PB", GB);
+
+    // Illegal number  specification, this should throw.
+    conf.setStrings(key, "HadoopGB");
+    thrown.expect(IllegalArgumentException.class);
+    conf.getStorageSize(key, "1PB", GB);
+  }
+
+  @Test
   public void testTimeDurationWarning() {
     // check warn for possible loss of precision
     final String warnFormat = "Possible loss of precision converting %s" +
@@ -2239,6 +2315,21 @@ public class TestConfiguration {
     FileUtil.fullyDelete(tmpDir);
   }
 
+  public void testGettingPropertiesWithPrefix() throws Exception {
+    Configuration conf = new Configuration();
+    for (int i = 0; i < 10; i++) {
+      conf.set("prefix" + ".name" + i, "value");
+    }
+    conf.set("different.prefix" + ".name", "value");
+    Map<String, String> props = conf.getPropsWithPrefix("prefix");
+    assertEquals(props.size(), 10);
+
+    // test call with no properties for a given prefix
+    props = conf.getPropsWithPrefix("none");
+    assertNotNull(props.isEmpty());
+    assertTrue(props.isEmpty());
+  }
+
   public static void main(String[] argv) throws Exception {
     junit.textui.TestRunner.main(new String[]{
       TestConfiguration.class.getName()
@@ -2248,14 +2339,14 @@ public class TestConfiguration {
   @Test
   public void testGetAllPropertiesByTags() throws Exception {
 
-    out = new BufferedWriter(new FileWriter(CONFIG));
+    out = new BufferedWriter(new FileWriter(CONFIG_CORE));
     startConfig();
     appendPropertyByTag("dfs.cblock.trace.io", "false", "DEBUG");
     appendPropertyByTag("dfs.replication", "1", "PERFORMANCE,REQUIRED");
     appendPropertyByTag("dfs.namenode.logging.level", "INFO", "CLIENT,DEBUG");
     endConfig();
 
-    Path fileResource = new Path(CONFIG);
+    Path fileResource = new Path(CONFIG_CORE);
     conf.addResource(fileResource);
     conf.getProps();
 
@@ -2266,6 +2357,10 @@ public class TestConfiguration {
     tagList.add(CorePropertyTag.CLIENT);
 
     Properties properties = conf.getAllPropertiesByTags(tagList);
+    String[] sources = conf.getPropertySources("dfs.replication");
+    assertTrue(sources.length == 1);
+    assertTrue(Arrays.toString(sources).contains("core-site.xml"));
+
     assertEq(3, properties.size());
     assertEq(true, properties.containsKey("dfs.namenode.logging.level"));
     assertEq(true, properties.containsKey("dfs.replication"));

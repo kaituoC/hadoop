@@ -36,6 +36,7 @@ import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerRetryPolicy;
 import org.apache.hadoop.yarn.api.records.ContainerState;
+import org.apache.hadoop.yarn.api.records.ContainerSubState;
 import org.apache.hadoop.yarn.api.records.ContainerUpdateType;
 import org.apache.hadoop.yarn.api.records.ExecutionTypeRequest;
 import org.apache.hadoop.yarn.api.records.ExecutionType;
@@ -45,8 +46,10 @@ import org.apache.hadoop.yarn.api.records.LocalResourceVisibility;
 import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
+import org.apache.hadoop.yarn.api.records.NodeUpdateType;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueState;
+import org.apache.hadoop.yarn.api.records.RejectionReason;
 import org.apache.hadoop.yarn.api.records.ReservationRequestInterpreter;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceInformation;
@@ -54,6 +57,8 @@ import org.apache.hadoop.yarn.api.records.UpdateContainerError;
 import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.api.resource.PlacementConstraint.TargetExpression;
+import org.apache.hadoop.yarn.api.resource.PlacementConstraint.TimedPlacementConstraint;
 import org.apache.hadoop.yarn.proto.YarnProtos;
 import org.apache.hadoop.yarn.proto.YarnProtos.AMCommandProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationAccessTypeProto;
@@ -61,16 +66,19 @@ import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationResourceUsageReportPro
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationTimeoutTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerIdProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerStateProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ContainerSubStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.FinalApplicationStatusProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceVisibilityProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LogAggregationStatusProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeIdProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeStateProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.PlacementConstraintTargetProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.QueueACLProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.QueueStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ReservationRequestInterpreterProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ResourceProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.TimedPlacementConstraintProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.YarnApplicationAttemptStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.YarnApplicationStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerRetryPolicyProto;
@@ -78,6 +86,7 @@ import org.apache.hadoop.yarn.proto.YarnProtos.ContainerTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ExecutionTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ExecutionTypeRequestProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ResourceTypesProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.NodeUpdateTypeProto;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.ContainerUpdateTypeProto;
 import org.apache.hadoop.yarn.server.api.ContainerType;
@@ -92,7 +101,7 @@ public class ProtoUtils {
   /*
    * ContainerState
    */
-  private static String CONTAINER_STATE_PREFIX = "C_";
+  private final static String CONTAINER_STATE_PREFIX = "C_";
   public static ContainerStateProto convertToProtoFormat(ContainerState e) {
     return ContainerStateProto.valueOf(CONTAINER_STATE_PREFIX + e.name());
   }
@@ -101,9 +110,23 @@ public class ProtoUtils {
   }
 
   /*
+   * Container SubState
+   */
+  private final static String CONTAINER_SUB_STATE_PREFIX = "CSS_";
+  public static ContainerSubStateProto convertToProtoFormat(
+      ContainerSubState e) {
+    return ContainerSubStateProto.valueOf(
+        CONTAINER_SUB_STATE_PREFIX + e.name());
+  }
+  public static ContainerSubState convertFromProtoFormat(
+      ContainerSubStateProto e) {
+    return ContainerSubState.valueOf(
+        e.name().substring(CONTAINER_SUB_STATE_PREFIX.length()));
+  }
+  /*
    * NodeState
    */
-  private static String NODE_STATE_PREFIX = "NS_";
+  private final static String NODE_STATE_PREFIX = "NS_";
   public static NodeStateProto convertToProtoFormat(NodeState e) {
     return NodeStateProto.valueOf(NODE_STATE_PREFIX + e.name());
   }
@@ -208,6 +231,21 @@ public class ProtoUtils {
   }
   public static AMCommand convertFromProtoFormat(AMCommandProto e) {
     return AMCommand.valueOf(e.name());
+  }
+
+  /*
+   * RejectionReason
+   */
+  private static final String REJECTION_REASON_PREFIX = "RRP_";
+  public static YarnProtos.RejectionReasonProto convertToProtoFormat(
+      RejectionReason e) {
+    return YarnProtos.RejectionReasonProto
+        .valueOf(REJECTION_REASON_PREFIX + e.name());
+  }
+  public static RejectionReason convertFromProtoFormat(
+      YarnProtos.RejectionReasonProto e) {
+    return RejectionReason.valueOf(e.name()
+        .replace(REJECTION_REASON_PREFIX, ""));
   }
 
   /*
@@ -325,6 +363,16 @@ public class ProtoUtils {
   }
   public static ContainerType convertFromProtoFormat(ContainerTypeProto e) {
     return ContainerType.valueOf(e.name());
+  }
+
+  /*
+  * NodeUpdateType
+  */
+  public static NodeUpdateTypeProto convertToProtoFormat(NodeUpdateType e) {
+    return NodeUpdateTypeProto.valueOf(e.name());
+  }
+  public static NodeUpdateType convertFromProtoFormat(NodeUpdateTypeProto e) {
+    return NodeUpdateType.valueOf(e.name());
   }
 
   /*
@@ -478,6 +526,29 @@ public class ProtoUtils {
       ret.add(tmp.build());
     }
     return ret;
+  }
+
+  public static PlacementConstraintTargetProto.TargetType convertToProtoFormat(
+          TargetExpression.TargetType t) {
+    return PlacementConstraintTargetProto.TargetType.valueOf(t.name());
+  }
+
+  public static TargetExpression.TargetType convertFromProtoFormat(
+          PlacementConstraintTargetProto.TargetType t) {
+    return TargetExpression.TargetType.valueOf(t.name());
+  }
+
+  /*
+   * TimedPlacementConstraint.DelayUnit
+   */
+  public static TimedPlacementConstraintProto.DelayUnit convertToProtoFormat(
+          TimedPlacementConstraint.DelayUnit u) {
+    return TimedPlacementConstraintProto.DelayUnit.valueOf(u.name());
+  }
+
+  public static TimedPlacementConstraint.DelayUnit convertFromProtoFormat(
+          TimedPlacementConstraintProto.DelayUnit u) {
+    return TimedPlacementConstraint.DelayUnit.valueOf(u.name());
   }
 }
 

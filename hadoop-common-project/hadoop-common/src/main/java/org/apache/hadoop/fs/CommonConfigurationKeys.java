@@ -98,7 +98,7 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /**
    * CallQueue related settings. These are not used directly, but rather
    * combined with a namespace and port. For instance:
-   * IPC_NAMESPACE + ".9820." + IPC_CALLQUEUE_IMPL_KEY
+   * IPC_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
    */
   public static final String IPC_NAMESPACE = "ipc";
   public static final String IPC_CALLQUEUE_IMPL_KEY = "callqueue.impl";
@@ -224,6 +224,8 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   SECURITY_NAMENODE_PROTOCOL_ACL = "security.namenode.protocol.acl";
   public static final String SECURITY_QJOURNAL_SERVICE_PROTOCOL_ACL =
       "security.qjournal.service.protocol.acl";
+  public static final String SECURITY_INTERQJOURNAL_SERVICE_PROTOCOL_ACL =
+      "security.interqjournal.service.protocol.acl";
   public static final String HADOOP_SECURITY_TOKEN_SERVICE_USE_IP =
       "hadoop.security.token.service.use_ip";
   public static final boolean HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT =

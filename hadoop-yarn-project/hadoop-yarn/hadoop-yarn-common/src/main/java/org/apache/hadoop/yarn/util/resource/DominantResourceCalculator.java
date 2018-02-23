@@ -496,6 +496,27 @@ public class DominantResourceCalculator extends ResourceCalculator {
   }
 
   @Override
+  public Resource multiplyAndNormalizeUp(Resource r, double[] by,
+      Resource stepFactor) {
+    Resource ret = Resource.newInstance(r);
+    int maxLength = ResourceUtils.getNumberOfKnownResourceTypes();
+    for (int i = 0; i < maxLength; i++) {
+      ResourceInformation rResourceInformation = r.getResourceInformation(i);
+      ResourceInformation stepFactorResourceInformation = stepFactor
+          .getResourceInformation(i);
+
+      long rValue = rResourceInformation.getValue();
+      long stepFactorValue = UnitsConversionUtil.convert(
+          stepFactorResourceInformation.getUnits(),
+          rResourceInformation.getUnits(),
+          stepFactorResourceInformation.getValue());
+      ret.setResourceValue(i, ResourceCalculator
+          .roundUp((long) Math.ceil(rValue * by[i]), stepFactorValue));
+    }
+    return ret;
+  }
+
+  @Override
   public Resource multiplyAndNormalizeUp(Resource r, double by,
       Resource stepFactor) {
     return this.multiplyAndNormalize(r, by, stepFactor, true);
@@ -557,6 +578,39 @@ public class DominantResourceCalculator extends ResourceCalculator {
 
   @Override
   public boolean isAnyMajorResourceZero(Resource resource) {
-    return resource.getMemorySize() == 0f || resource.getVirtualCores() == 0;
+    int maxLength = ResourceUtils.getNumberOfKnownResourceTypes();
+    for (int i = 0; i < maxLength; i++) {
+      ResourceInformation resourceInformation = resource
+          .getResourceInformation(i);
+      if (resourceInformation.getValue() == 0L) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @Override
+  public Resource normalizeDown(Resource r, Resource stepFactor) {
+    Resource ret = Resource.newInstance(r);
+    int maxLength = ResourceUtils.getNumberOfKnownResourceTypes();
+    for (int i = 0; i < maxLength; i++) {
+      ResourceInformation rResourceInformation = r.getResourceInformation(i);
+      ResourceInformation stepFactorResourceInformation = stepFactor
+          .getResourceInformation(i);
+      ResourceInformation tmp = ret.getResourceInformation(i);
+
+      long rValue = rResourceInformation.getValue();
+      long stepFactorValue = UnitsConversionUtil.convert(
+          stepFactorResourceInformation.getUnits(),
+          rResourceInformation.getUnits(),
+          stepFactorResourceInformation.getValue());
+
+      long value = rValue;
+      if (stepFactorValue != 0) {
+        value = roundDown(rValue, stepFactorValue);
+      }
+      tmp.setValue(value);
+    }
+    return ret;
   }
 }

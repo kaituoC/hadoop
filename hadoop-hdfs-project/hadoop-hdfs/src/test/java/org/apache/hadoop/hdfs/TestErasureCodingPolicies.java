@@ -25,6 +25,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.protocol.AddErasureCodingPolicyResponse;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyInfo;
 import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
@@ -49,6 +50,7 @@ import org.junit.rules.Timeout;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
@@ -305,6 +307,40 @@ public class TestErasureCodingPolicies {
   }
 
   @Test
+  public void testErasureCodingPolicyOnReservedDir() throws IOException {
+    final Path reserveDir = new Path("/.reserved");
+    // verify the EC policy is null, not an exception
+    ErasureCodingPolicy policy = fs.getErasureCodingPolicy(reserveDir);
+    assertNull("Got unexpected erasure coding policy", policy);
+
+    // root EC policy before being set is null, verify the reserved raw dir
+    // is treated as root
+    final Path root = new Path("/");
+    final Path rawRoot = new Path("/.reserved/raw");
+    final Path rawRootSlash = new Path("/.reserved/raw/");
+    assertNull("Got unexpected erasure coding policy",
+        fs.getErasureCodingPolicy(root));
+    assertNull("Got unexpected erasure coding policy",
+        fs.getErasureCodingPolicy(rawRoot));
+    assertNull("Got unexpected erasure coding policy",
+        fs.getErasureCodingPolicy(rawRootSlash));
+
+    // verify the EC policy correctness under the reserved raw dir
+    final Path ecDir = new Path("/ec");
+    fs.mkdirs(ecDir);
+    fs.setErasureCodingPolicy(ecDir, ecPolicy.getName());
+
+    ErasureCodingPolicy policyBase = fs.getErasureCodingPolicy(ecDir);
+    assertEquals("Got unexpected erasure coding policy", ecPolicy,
+        policyBase);
+
+    final Path rawRootEc = new Path("/.reserved/raw/ec");
+    ErasureCodingPolicy policyMap = fs.getErasureCodingPolicy(rawRootEc);
+    assertEquals("Got unexpected erasure coding policy", ecPolicy,
+        policyMap);
+  }
+
+  @Test
   public void testGetErasureCodingPolicy() throws Exception {
     List<ErasureCodingPolicy> sysECPolicies =
         SystemErasureCodingPolicies.getPolicies();
@@ -375,10 +411,16 @@ public class TestErasureCodingPolicies {
 
   @Test
   public void testGetAllErasureCodingPolicies() throws Exception {
-    Collection<ErasureCodingPolicy> allECPolicies = fs
+    Collection<ErasureCodingPolicyInfo> allECPolicies = fs
         .getAllErasureCodingPolicies();
-    assertTrue("All system policies should be enabled",
-        allECPolicies.containsAll(SystemErasureCodingPolicies.getPolicies()));
+    final List<ErasureCodingPolicy> sysPolicies =
+        new ArrayList<>(SystemErasureCodingPolicies.getPolicies());
+    for (ErasureCodingPolicyInfo ecpi : allECPolicies) {
+      if (ecpi.isEnabled()) {
+        sysPolicies.remove(ecpi.getPolicy());
+      }
+    }
+    assertTrue("All system policies should be enabled", sysPolicies.isEmpty());
 
     // Query after add a new policy
     ECSchema toAddSchema = new ECSchema("rs", 5, 2);
@@ -609,11 +651,11 @@ public class TestErasureCodingPolicies {
     fs.setErasureCodingPolicy(dirPath, ecPolicy.getName());
 
     String ecPolicyName = null;
-    Collection<ErasureCodingPolicy> allPolicies =
+    final Collection<ErasureCodingPolicyInfo> allPoliciesInfo =
         fs.getAllErasureCodingPolicies();
-    for (ErasureCodingPolicy policy : allPolicies) {
-      if (!ecPolicy.equals(policy)) {
-        ecPolicyName = policy.getName();
+    for (ErasureCodingPolicyInfo info : allPoliciesInfo) {
+      if (!ecPolicy.equals(info.getPolicy())) {
+        ecPolicyName = info.getPolicy().getName();
         break;
       }
     }
@@ -749,6 +791,33 @@ public class TestErasureCodingPolicies {
         return null;
       }
     });
+  }
+
+  @Test
+  public void testAddECPoliciesExceeded() throws Exception {
+    ECSchema toAddSchema = new ECSchema("rs", 3, 2);
+    int allowNumPolicies = ErasureCodeConstants.MAX_POLICY_ID -
+        ErasureCodeConstants.USER_DEFINED_POLICY_START_ID + 1;
+    for (int i = 0; i < allowNumPolicies; i++) {
+      ErasureCodingPolicy erasureCodingPolicy = new ErasureCodingPolicy(
+          toAddSchema, 1024 + 1024 * i);
+      ErasureCodingPolicy[] policyArray =
+          new ErasureCodingPolicy[]{erasureCodingPolicy};
+      AddErasureCodingPolicyResponse[] responses =
+          fs.addErasureCodingPolicies(policyArray);
+      assertEquals(1, responses.length);
+      assertTrue(responses[0].isSucceed());
+      assertEquals(responses[0].getPolicy().getId(),
+          ErasureCodeConstants.USER_DEFINED_POLICY_START_ID + i);
+    }
+    ErasureCodingPolicy erasureCodingPolicy = new ErasureCodingPolicy(
+        toAddSchema, 1024 + 1024 * allowNumPolicies);
+    ErasureCodingPolicy[] policyArray =
+        new ErasureCodingPolicy[]{erasureCodingPolicy};
+    AddErasureCodingPolicyResponse[] responses =
+        fs.addErasureCodingPolicies(policyArray);
+    assertEquals(1, responses.length);
+    assertFalse(responses[0].isSucceed());
   }
 
   @Test

@@ -21,7 +21,6 @@ package org.apache.hadoop.yarn.api.records;
 import java.io.Serializable;
 
 import org.apache.hadoop.classification.InterfaceAudience.Public;
-import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
@@ -99,21 +98,7 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
         .resourceName(hostName).capability(capability)
         .numContainers(numContainers).relaxLocality(relaxLocality)
         .nodeLabelExpression(labelExpression)
-        .executionTypeRequest(executionTypeRequest).profileCapability(null)
-        .build();
-  }
-
-  @Public
-  @Unstable
-  public static ResourceRequest newInstance(Priority priority, String hostName,
-      Resource capability, int numContainers, boolean relaxLocality,
-      String labelExpression, ExecutionTypeRequest executionTypeRequest,
-      ProfileCapability profile) {
-    return ResourceRequest.newBuilder().priority(priority)
-        .resourceName(hostName).capability(capability)
-        .numContainers(numContainers).relaxLocality(relaxLocality)
-        .nodeLabelExpression(labelExpression)
-        .executionTypeRequest(executionTypeRequest).profileCapability(profile)
+        .executionTypeRequest(executionTypeRequest)
         .build();
   }
 
@@ -140,7 +125,6 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
       resourceRequest.setRelaxLocality(true);
       resourceRequest.setExecutionTypeRequest(
           ExecutionTypeRequest.newInstance());
-      resourceRequest.setProfileCapability(null);
     }
 
     /**
@@ -240,6 +224,22 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
     }
 
     /**
+     * Set the <code>executionTypeRequest</code> of the request with 'ensure
+     * execution type' flag set to true.
+     * @see ResourceRequest#setExecutionTypeRequest(
+     * ExecutionTypeRequest)
+     * @param executionType <code>executionType</code> of the request.
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Evolving
+    public ResourceRequestBuilder executionType(ExecutionType executionType) {
+      resourceRequest.setExecutionTypeRequest(
+          ExecutionTypeRequest.newInstance(executionType, true));
+      return this;
+    }
+
+    /**
      * Set the <code>allocationRequestId</code> of the request.
      * @see ResourceRequest#setAllocationRequestId(long)
      * @param allocationRequestId
@@ -251,21 +251,6 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
     public ResourceRequestBuilder allocationRequestId(
         long allocationRequestId) {
       resourceRequest.setAllocationRequestId(allocationRequestId);
-      return this;
-    }
-
-    /**
-     * Set the <code>resourceProfile</code> of the request.
-     * @see ResourceRequest#setProfileCapability(ProfileCapability)
-     * @param profileCapability
-     *          <code>profileCapability</code> of the request
-     * @return {@link ResourceRequestBuilder}
-     */
-    @Public
-    @InterfaceStability.Unstable
-    public ResourceRequestBuilder profileCapability(
-        ProfileCapability profileCapability) {
-      resourceRequest.setProfileCapability(profileCapability);
       return this;
     }
 
@@ -486,14 +471,6 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   @Evolving
   public abstract void setNodeLabelExpression(String nodelabelExpression);
 
-  @Public
-  @InterfaceStability.Unstable
-  public abstract ProfileCapability getProfileCapability();
-
-  @Public
-  @InterfaceStability.Unstable
-  public abstract void setProfileCapability(ProfileCapability p);
-
   /**
    * Get the optional <em>ID</em> corresponding to this allocation request. This
    * ID is an identifier for different {@code ResourceRequest}s from the <b>same
@@ -569,14 +546,12 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
     Resource capability = getCapability();
     String hostName = getResourceName();
     Priority priority = getPriority();
-    ProfileCapability profile = getProfileCapability();
     result =
         prime * result + ((capability == null) ? 0 : capability.hashCode());
     result = prime * result + ((hostName == null) ? 0 : hostName.hashCode());
     result = prime * result + getNumContainers();
     result = prime * result + ((priority == null) ? 0 : priority.hashCode());
     result = prime * result + Long.valueOf(getAllocationRequestId()).hashCode();
-    result = prime * result + ((profile == null) ? 0 : profile.hashCode());
     return result;
   }
 
@@ -614,8 +589,7 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
       if (other.getExecutionTypeRequest() != null) {
         return false;
       }
-    } else if (!execTypeRequest.getExecutionType()
-        .equals(other.getExecutionTypeRequest().getExecutionType())) {
+    } else if (!execTypeRequest.equals(other.getExecutionTypeRequest())) {
       return false;
     }
 

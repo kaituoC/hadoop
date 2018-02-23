@@ -28,7 +28,7 @@
 #    if hdfs_subcmd_user is not defined, error
 #
 # For secure daemons, this means both the secure and insecure env vars need to be
-# defined.  e.g., HDFS_DATANODE_USER=root HADOOP_SECURE_DN_USER=hdfs
+# defined.  e.g., HDFS_DATANODE_USER=root HDFS_DATANODE_SECURE_USER=hdfs
 #
 
 ## @description  usage info
@@ -146,7 +146,7 @@ fi
 
 JOURNAL_NODES=$("${HADOOP_HDFS_HOME}/bin/hdfs" getconf -journalNodes 2>&-)
 
-if [[ "{$JOURNAL_NODES-}" != $'\n' ]]; then
+if [[ "${#JOURNAL_NODES}" != 0 ]]; then
   echo "Starting journal nodes [${JOURNAL_NODES}]"
 
   hadoop_uservar_su hdfs journalnode "${HADOOP_HDFS_HOME}/bin/hdfs" \

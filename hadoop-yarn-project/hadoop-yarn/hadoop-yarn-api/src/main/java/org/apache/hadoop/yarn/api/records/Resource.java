@@ -18,18 +18,22 @@
 
 package org.apache.hadoop.yarn.api.records;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang.NotImplementedException;
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
+import org.apache.hadoop.yarn.api.protocolrecords.ResourceTypes;
 import org.apache.hadoop.yarn.api.records.impl.LightWeightResource;
 import org.apache.hadoop.yarn.exceptions.ResourceNotFoundException;
-import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.resource.ResourceUtils;
 
 /**
@@ -66,40 +70,58 @@ public abstract class Resource implements Comparable<Resource> {
   // copy array, etc.
   protected static final int NUM_MANDATORY_RESOURCES = 2;
 
-  protected static final int MEMORY_INDEX = 0;
-  protected static final int VCORES_INDEX = 1;
+  @Private
+  public static final int MEMORY_INDEX = 0;
+  @Private
+  public static final int VCORES_INDEX = 1;
 
   @Public
   @Stable
   public static Resource newInstance(int memory, int vCores) {
-    if (ResourceUtils.getNumberOfKnownResourceTypes() > 2) {
-      Resource ret = Records.newRecord(Resource.class);
-      ret.setMemorySize(memory);
-      ret.setVirtualCores(vCores);
-      return ret;
-    }
     return new LightWeightResource(memory, vCores);
   }
 
   @Public
   @Stable
   public static Resource newInstance(long memory, int vCores) {
-    if (ResourceUtils.getNumberOfKnownResourceTypes() > 2) {
-      Resource ret = Records.newRecord(Resource.class);
-      ret.setMemorySize(memory);
-      ret.setVirtualCores(vCores);
-      return ret;
-    }
     return new LightWeightResource(memory, vCores);
+  }
+
+  /**
+   * Create a new {@link Resource} instance with the given CPU and memory
+   * values and additional resource values as set in the {@code others}
+   * parameter. Note that the CPU and memory settings in the {@code others}
+   * parameter will be ignored.
+   *
+   * @param memory the memory value
+   * @param vCores the CPU value
+   * @param others a map of other resource values indexed by resource name
+   * @return a {@link Resource} instance with the given resource values
+   */
+  @Public
+  @Stable
+  public static Resource newInstance(long memory, int vCores,
+      Map<String, Long> others) {
+    if (others != null) {
+      return new LightWeightResource(memory, vCores,
+          ResourceUtils.createResourceTypesArray(others));
+    } else {
+      return newInstance(memory, vCores);
+    }
   }
 
   @InterfaceAudience.Private
   @InterfaceStability.Unstable
   public static Resource newInstance(Resource resource) {
-    Resource ret = Resource.newInstance(resource.getMemorySize(),
-        resource.getVirtualCores());
-    if (ResourceUtils.getNumberOfKnownResourceTypes() > 2) {
-      Resource.copy(resource, ret);
+    Resource ret;
+    int numberOfKnownResourceTypes = ResourceUtils
+        .getNumberOfKnownResourceTypes();
+    if (numberOfKnownResourceTypes > 2) {
+      ret = new LightWeightResource(resource.getMemorySize(),
+          resource.getVirtualCores(), resource.getResources());
+    } else {
+      ret = new LightWeightResource(resource.getMemorySize(),
+          resource.getVirtualCores());
     }
     return ret;
   }
@@ -210,6 +232,22 @@ public abstract class Resource implements Comparable<Resource> {
   @InterfaceStability.Unstable
   public ResourceInformation[] getResources() {
     return resources;
+  }
+
+  /**
+   * Get list of resource information, this will be used by JAXB.
+   * @return list of resources copy.
+   */
+  @InterfaceAudience.Private
+  @InterfaceStability.Unstable
+  public List<ResourceInformation> getAllResourcesListCopy() {
+    List<ResourceInformation> list = new ArrayList<>();
+    for (ResourceInformation i : resources) {
+      ResourceInformation ri = new ResourceInformation();
+      ResourceInformation.copy(i, ri);
+      list.add(ri);
+    }
+    return list;
   }
 
   /**
@@ -331,6 +369,9 @@ public abstract class Resource implements Comparable<Resource> {
       return;
     }
     if (resource.equals(ResourceInformation.VCORES_URI)) {
+      if (value > Integer.MAX_VALUE) {
+        value = (long) Integer.MAX_VALUE;
+      }
       this.setVirtualCores((int)value);
       return;
     }
@@ -361,7 +402,7 @@ public abstract class Resource implements Comparable<Resource> {
     }
   }
 
-  private void throwExceptionWhenArrayOutOfBound(int index) {
+  protected void throwExceptionWhenArrayOutOfBound(int index) {
     String exceptionMsg = String.format(
         "Trying to access ResourceInformation for given index=%d. "
             + "Acceptable index range is [0,%d), please check double check "
@@ -408,7 +449,7 @@ public abstract class Resource implements Comparable<Resource> {
     int arrLenOther = otherResources.length;
 
     // compare memory and vcores first(in that order) to preserve
-    // existing behaviour
+    // existing behavior.
     for (int i = 0; i < arrLenThis; i++) {
       ResourceInformation otherEntry;
       try {
@@ -460,10 +501,43 @@ public abstract class Resource implements Comparable<Resource> {
   @Override
   public int hashCode() {
     final int prime = 47;
-    long result = 0;
+    int result = 0;
     for (ResourceInformation entry : resources) {
       result = prime * result + entry.hashCode();
     }
-    return (int) result;
+    return result;
+  }
+
+  /**
+   * Convert long to int for a resource value safely. This method assumes
+   * resource value is positive.
+   *
+   * @param value long resource value
+   * @return int resource value
+   */
+  protected static int castToIntSafely(long value) {
+    if (value > Integer.MAX_VALUE) {
+      return Integer.MAX_VALUE;
+    }
+    return Long.valueOf(value).intValue();
+  }
+
+  /**
+   * Create ResourceInformation with basic fields.
+   * @param name Resource Type Name
+   * @param unit Default unit of provided resource type
+   * @param value Value associated with giveb resource
+   * @return ResourceInformation object
+   */
+  protected static ResourceInformation newDefaultInformation(String name,
+      String unit, long value) {
+    ResourceInformation ri = new ResourceInformation();
+    ri.setName(name);
+    ri.setValue(value);
+    ri.setResourceType(ResourceTypes.COUNTABLE);
+    ri.setUnitsWithoutValidation(unit);
+    ri.setMinimumAllocation(0);
+    ri.setMaximumAllocation(Long.MAX_VALUE);
+    return ri;
   }
 }

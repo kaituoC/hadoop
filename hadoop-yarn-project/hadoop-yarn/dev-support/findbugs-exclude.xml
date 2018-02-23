@@ -178,6 +178,18 @@
     <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.FairOrderingPolicy$FairComparator" />
     <Bug pattern="SE_COMPARATOR_SHOULD_BE_SERIALIZABLE" />
   </Match>
+  <Match>
+    <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy$DominantResourceFairnessComparator" />
+    <Bug pattern="SE_COMPARATOR_SHOULD_BE_SERIALIZABLE" />
+  </Match>
+  <Match>
+    <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy$DominantResourceFairnessComparator2" />
+    <Bug pattern="SE_COMPARATOR_SHOULD_BE_SERIALIZABLE" />
+  </Match>
+  <Match>
+    <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy$DominantResourceFairnessComparatorN" />
+    <Bug pattern="SE_COMPARATOR_SHOULD_BE_SERIALIZABLE" />
+  </Match>
     <Match>
     <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.CompoundComparator" />
     <Bug pattern="SE_COMPARATOR_SHOULD_BE_SERIALIZABLE" />
@@ -617,8 +629,33 @@
   </Match>
 
   <Match>
-    <Class name="org.apache.hadoop.yarn.api.records.Resource" />
-    <Method name="getResources" />
-    <Bug pattern="EI_EXPOSE_REP" />
+    <Class name="org.apache.hadoop.registry.server.dns.RegistryDNS" />
+    <Method name="addNIOTCP" />
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE" />
   </Match>
+  <Match>
+    <Class name="org.apache.hadoop.registry.server.dns.RegistryDNS" />
+    <Method name="addNIOUDP" />
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE" />
+  </Match>
+  <Match>
+    <Class name="org.apache.hadoop.registry.server.dns.RegistryDNS" />
+    <Method name="serveNIOTCP" />
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE" />
+  </Match>
+
+  <!-- EQ_OVERRIDING_EQUALS_NOT_SYMMETRIC -->
+  <Match>
+    <Class name="org.apache.hadoop.yarn.server.nodemanager.containermanager.resourceplugin.gpu.AssignedGpuDevice" />
+    <Method name="equals" />
+    <Bug pattern="EQ_OVERRIDING_EQUALS_NOT_SYMMETRIC" />
+  </Match>
+
+  <!-- Null pointer exception needs to be ignored here as Findbugs doesn't properly detect code logic -->
+  <Match>
+    <Class name="org.apache.hadoop.yarn.server.resourcemanager.scheduler.placement.SingleConstraintAppPlacementAllocator" />
+    <Method name="validateAndSetSchedulingRequest" />
+    <Bug pattern="NP_NULL_ON_SOME_PATH" />
+  </Match>
+
 </FindBugsFilter>

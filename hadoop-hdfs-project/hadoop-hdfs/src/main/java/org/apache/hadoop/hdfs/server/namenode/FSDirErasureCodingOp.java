@@ -26,6 +26,7 @@ import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.hdfs.XAttrHelper;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyInfo;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.WritableUtils;
@@ -298,8 +299,7 @@ final class FSDirErasureCodingOp {
 
     final List<XAttr> xattrs = Lists.newArrayListWithCapacity(1);
     xattrs.add(ecXAttr);
-    FSDirXAttrOp.unprotectedRemoveXAttrs(fsd, srcIIP, xattrs);
-    return xattrs;
+    return FSDirXAttrOp.unprotectedRemoveXAttrs(fsd, srcIIP, xattrs);
   }
 
   /**
@@ -307,7 +307,8 @@ final class FSDirErasureCodingOp {
    *
    * @param fsn namespace
    * @param src path
-   * @return {@link ErasureCodingPolicy}
+   * @return {@link ErasureCodingPolicy}, or null if no policy has
+   * been set or the policy is REPLICATION
    * @throws IOException
    * @throws FileNotFoundException if the path does not exist.
    * @throws AccessControlException if no read access
@@ -317,17 +318,25 @@ final class FSDirErasureCodingOp {
       throws IOException, AccessControlException {
     assert fsn.hasReadLock();
 
+    if (FSDirectory.isExactReservedName(src)) {
+      return null;
+    }
+
     FSDirectory fsd = fsn.getFSDirectory();
     final INodesInPath iip = fsd.resolvePath(pc, src, DirOp.READ);
     if (fsn.isPermissionEnabled()) {
       fsn.getFSDirectory().checkPathAccess(pc, iip, FsAction.READ);
     }
 
-    if (iip.getLastINode() == null) {
-      throw new FileNotFoundException("Path not found: " + iip.getPath());
+    ErasureCodingPolicy ecPolicy;
+    if (iip.isDotSnapshotDir()) {
+      ecPolicy = null;
+    } else if (iip.getLastINode() == null) {
+      throw new FileNotFoundException("Path not found: " + src);
+    } else {
+      ecPolicy = getErasureCodingPolicyForPath(fsd, iip);
     }
 
-    ErasureCodingPolicy ecPolicy = getErasureCodingPolicyForPath(fsd, iip);
     if (ecPolicy != null && ecPolicy.isReplicationPolicy()) {
       ecPolicy = null;
     }
@@ -367,10 +376,10 @@ final class FSDirErasureCodingOp {
    * Get available erasure coding polices.
    *
    * @param fsn namespace
-   * @return {@link ErasureCodingPolicy} array
+   * @return {@link ErasureCodingPolicyInfo} array
    */
-  static ErasureCodingPolicy[] getErasureCodingPolicies(final FSNamesystem fsn)
-      throws IOException {
+  static ErasureCodingPolicyInfo[] getErasureCodingPolicies(
+      final FSNamesystem fsn) throws IOException {
     assert fsn.hasReadLock();
     return fsn.getErasureCodingPolicyManager().getPolicies();
   }
@@ -409,7 +418,7 @@ final class FSDirErasureCodingOp {
         if (inode.isSymlink()) {
           return null;
         }
-        final XAttrFeature xaf = inode.getXAttrFeature();
+        final XAttrFeature xaf = inode.getXAttrFeature(iip.getPathSnapshotId());
         if (xaf != null) {
           XAttr xattr = xaf.getXAttr(XATTR_ERASURECODING_POLICY);
           if (xattr != null) {

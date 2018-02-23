@@ -363,11 +363,12 @@ public class StripedFileTestUtil {
     List<List<LocatedBlock>> blockGroupList = new ArrayList<>();
     LocatedBlocks lbs = dfs.getClient().getLocatedBlocks(srcPath.toString(), 0L,
         Long.MAX_VALUE);
-    int expectedNumGroup = 0;
+
     if (length > 0) {
-      expectedNumGroup = (length - 1) / blkGroupSize + 1;
+      int expectedNumGroup = (length - 1) / blkGroupSize + 1;
+
+      assertEquals(expectedNumGroup, lbs.getLocatedBlocks().size());
     }
-    assertEquals(expectedNumGroup, lbs.getLocatedBlocks().size());
 
     final ErasureCodingPolicy ecPolicy = dfs.getErasureCodingPolicy(srcPath);
     final int cellSize = ecPolicy.getCellSize();
@@ -502,7 +503,11 @@ public class StripedFileTestUtil {
         dataBytes.length, parityBytes.length);
     final RawErasureEncoder encoder =
         CodecUtil.createRawEncoder(conf, codecName, coderOptions);
-    encoder.encode(dataBytes, expectedParityBytes);
+    try {
+      encoder.encode(dataBytes, expectedParityBytes);
+    } catch (IOException e) {
+      Assert.fail("Unexpected IOException: " + e.getMessage());
+    }
     for (int i = 0; i < parityBytes.length; i++) {
       if (checkSet.contains(i + dataBytes.length)){
         Assert.assertArrayEquals("i=" + i, expectedParityBytes[i],

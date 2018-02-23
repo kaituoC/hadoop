@@ -148,6 +148,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppRepor
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 
@@ -159,6 +160,7 @@ import org.apache.hadoop.yarn.util.UTCClock;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Test;
 
 import com.google.common.collect.ImmutableSet;
@@ -177,6 +179,50 @@ public class TestClientRMService {
   
   private final static String QUEUE_1 = "Q-1";
   private final static String QUEUE_2 = "Q-2";
+
+  @Test
+  public void testGetDecommissioningClusterNodes() throws Exception {
+    MockRM rm = new MockRM() {
+      protected ClientRMService createClientRMService() {
+        return new ClientRMService(this.rmContext, scheduler,
+            this.rmAppManager, this.applicationACLsManager,
+            this.queueACLsManager,
+            this.getRMContext().getRMDelegationTokenSecretManager());
+      };
+    };
+    rm.start();
+
+    int nodeMemory = 1024;
+    MockNM nm1 = rm.registerNode("host1:1234", nodeMemory);
+    rm.sendNodeStarted(nm1);
+    nm1.nodeHeartbeat(true);
+    rm.waitForState(nm1.getNodeId(), NodeState.RUNNING);
+    Integer decommissioningTimeout = 600;
+    rm.sendNodeGracefulDecommission(nm1, decommissioningTimeout);
+    rm.waitForState(nm1.getNodeId(), NodeState.DECOMMISSIONING);
+
+    // Create a client.
+    Configuration conf = new Configuration();
+    YarnRPC rpc = YarnRPC.create(conf);
+    InetSocketAddress rmAddress = rm.getClientRMService().getBindAddress();
+    LOG.info("Connecting to ResourceManager at " + rmAddress);
+    ApplicationClientProtocol client =
+        (ApplicationClientProtocol) rpc
+            .getProxy(ApplicationClientProtocol.class, rmAddress, conf);
+
+    // Make call
+    List<NodeReport> nodeReports = client.getClusterNodes(
+        GetClusterNodesRequest.newInstance(
+            EnumSet.of(NodeState.DECOMMISSIONING)))
+        .getNodeReports();
+    Assert.assertEquals(1, nodeReports.size());
+    NodeReport nr = nodeReports.iterator().next();
+    Assert.assertEquals(decommissioningTimeout, nr.getDecommissioningTimeout());
+    Assert.assertNull(nr.getNodeUpdateType());
+
+    rpc.stopProxy(client, conf);
+    rm.close();
+  }
 
   @Test
   public void testGetClusterNodes() throws Exception {
@@ -226,6 +272,8 @@ public class TestClientRMService {
     
     // Check node's label = x
     Assert.assertTrue(nodeReports.get(0).getNodeLabels().contains("x"));
+    Assert.assertNull(nodeReports.get(0).getDecommissioningTimeout());
+    Assert.assertNull(nodeReports.get(0).getNodeUpdateType());
 
     // Now make the node unhealthy.
     node.nodeHeartbeat(false);
@@ -249,6 +297,8 @@ public class TestClientRMService {
         nodeReports.get(0).getNodeState());
     
     Assert.assertTrue(nodeReports.get(0).getNodeLabels().contains("y"));
+    Assert.assertNull(nodeReports.get(0).getDecommissioningTimeout());
+    Assert.assertNull(nodeReports.get(0).getNodeUpdateType());
     
     // Remove labels of host1
     map = new HashMap<NodeId, Set<String>>();
@@ -265,6 +315,8 @@ public class TestClientRMService {
     for (NodeReport report : nodeReports) {
       Assert.assertTrue(report.getNodeLabels() != null
           && report.getNodeLabels().isEmpty());
+      Assert.assertNull(report.getDecommissioningTimeout());
+      Assert.assertNull(report.getNodeUpdateType());
     }
 
     rpc.stopProxy(client, conf);
@@ -1945,6 +1997,9 @@ public class TestClientRMService {
     int maxPriority = 10;
     int appPriority = 5;
     YarnConfiguration conf = new YarnConfiguration();
+    Assume.assumeFalse("FairScheduler does not support Application Priorities",
+        conf.get(YarnConfiguration.RM_SCHEDULER)
+            .equals(FairScheduler.class.getName()));
     conf.setInt(YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY,
         maxPriority);
     MockRM rm = new MockRM(conf);
@@ -1963,6 +2018,9 @@ public class TestClientRMService {
     int maxPriority = 10;
     int appPriority = 5;
     YarnConfiguration conf = new YarnConfiguration();
+    Assume.assumeFalse("FairScheduler does not support Application Priorities",
+        conf.get(YarnConfiguration.RM_SCHEDULER)
+            .equals(FairScheduler.class.getName()));
     conf.setInt(YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY,
         maxPriority);
     MockRM rm = new MockRM(conf);

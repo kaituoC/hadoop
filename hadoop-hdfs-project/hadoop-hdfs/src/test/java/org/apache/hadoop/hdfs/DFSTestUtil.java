@@ -118,6 +118,8 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
 import org.apache.hadoop.hdfs.protocol.ECBlockGroupStats;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyInfo;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyState;
 import org.apache.hadoop.hdfs.protocol.ReplicatedBlockStats;
 import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
@@ -147,6 +149,7 @@ import org.apache.hadoop.hdfs.server.datanode.DataNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.datanode.TestTransferRbw;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
+import org.apache.hadoop.hdfs.server.namenode.ErasureCodingPolicyManager;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
@@ -298,6 +301,19 @@ public class DFSTestUtil {
         SystemErasureCodingPolicies.getPolicies()) {
       fs.enableErasureCodingPolicy(ecPolicy.getName());
     }
+  }
+
+  public static ErasureCodingPolicyState getECPolicyState(
+      final ErasureCodingPolicy policy) {
+    final ErasureCodingPolicyInfo[] policyInfos =
+        ErasureCodingPolicyManager.getInstance().getPolicies();
+    for (ErasureCodingPolicyInfo pi : policyInfos) {
+      if (pi.getPolicy().equals(policy)) {
+        return pi.getState();
+      }
+    }
+    throw new IllegalArgumentException("ErasureCodingPolicy <" + policy
+        + "> doesn't exist in the policies:" + Arrays.toString(policyInfos));
   }
 
   /** class MyFile contains enough information to recreate the contents of
@@ -1494,6 +1510,29 @@ public class DFSTestUtil {
     // OP_REMOVE_ERASURE_CODING_POLICY
     filesystem.removeErasureCodingPolicy(newPolicy1.getName());
     filesystem.removeErasureCodingPolicy(newPolicy2.getName());
+
+    // OP_ADD on erasure coding directory
+    Path ecDir = new Path("/ec");
+    filesystem.mkdirs(ecDir);
+    final ErasureCodingPolicy defaultEcPolicy =
+        SystemErasureCodingPolicies.getByID(
+            SystemErasureCodingPolicies.RS_6_3_POLICY_ID);
+    final ErasureCodingPolicy ecPolicyRS32 =
+        SystemErasureCodingPolicies.getByID(
+            SystemErasureCodingPolicies.RS_3_2_POLICY_ID);
+    filesystem.enableErasureCodingPolicy(ecPolicyRS32.getName());
+    filesystem.enableErasureCodingPolicy(defaultEcPolicy.getName());
+    filesystem.setErasureCodingPolicy(ecDir, defaultEcPolicy.getName());
+
+    try (FSDataOutputStream out = filesystem.createFile(
+        new Path(ecDir, "replicated")).replicate().build()) {
+      out.write("replicated".getBytes());
+    }
+
+    try (FSDataOutputStream out = filesystem.createFile(
+        new Path(ecDir, "RS-3-2")).ecPolicyName(ecPolicyRS32.getName()).build()) {
+      out.write("RS-3-2".getBytes());
+    }
   }
 
   public static void abortStream(DFSOutputStream out) throws IOException {

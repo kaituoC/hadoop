@@ -19,10 +19,13 @@ package org.apache.hadoop.hdfs.tools;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.protocol.AddErasureCodingPolicyResponse;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyInfo;
 import org.apache.hadoop.hdfs.util.ECPolicyLoader;
 import org.apache.hadoop.io.erasurecode.ErasureCodeConstants;
 import org.apache.hadoop.tools.TableListing;
@@ -111,16 +114,16 @@ public class ECAdmin extends Configured implements Tool {
 
       final DistributedFileSystem dfs = AdminHelper.getDFS(conf);
       try {
-        Collection<ErasureCodingPolicy> policies =
+        final Collection<ErasureCodingPolicyInfo> policies =
             dfs.getAllErasureCodingPolicies();
         if (policies.isEmpty()) {
           System.out.println("There is no erasure coding policies in the " +
               "cluster.");
         } else {
           System.out.println("Erasure Coding Policies:");
-          for (ErasureCodingPolicy policy : policies) {
+          for (ErasureCodingPolicyInfo policy : policies) {
             if (policy != null) {
-              System.out.println(policy.toString());
+              System.out.println(policy);
             }
           }
         }
@@ -361,6 +364,12 @@ public class ECAdmin extends Configured implements Tool {
           System.out.println("Set erasure coding policy " + ecPolicyName +
               " on " + path);
         }
+        RemoteIterator<FileStatus> dirIt = dfs.listStatusIterator(p);
+        if (dirIt.hasNext()) {
+          System.out.println("Warning: setting erasure coding policy on a " +
+              "non-empty directory will not automatically convert existing" +
+              " files to " + ecPolicyName);
+        }
       } catch (Exception e) {
         System.err.println(AdminHelper.prettifyException(e));
         return 3;
@@ -411,6 +420,12 @@ public class ECAdmin extends Configured implements Tool {
       try {
         dfs.unsetErasureCodingPolicy(p);
         System.out.println("Unset erasure coding policy from " + path);
+        RemoteIterator<FileStatus> dirIt = dfs.listStatusIterator(p);
+        if (dirIt.hasNext()) {
+          System.out.println("Warning: unsetting erasure coding policy on a " +
+              "non-empty directory will not automatically convert existing" +
+              " files to replicated data.");
+        }
       } catch (Exception e) {
         System.err.println(AdminHelper.prettifyException(e));
         return 2;

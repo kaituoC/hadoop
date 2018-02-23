@@ -1253,7 +1253,10 @@ public class UserGroupInformation {
         Object cred = iter.next();
         if (cred instanceof KerberosTicket) {
           KerberosTicket ticket = (KerberosTicket) cred;
-          if (!ticket.getServer().getName().startsWith("krbtgt")) {
+          if (ticket.isDestroyed() || ticket.getServer() == null) {
+            LOG.warn("Ticket is already destroyed, remove it.");
+            iter.remove();
+          } else if (!ticket.getServer().getName().startsWith("krbtgt")) {
             LOG.warn(
                 "The first kerberos ticket is not TGT"
                     + "(the server principal is {}), remove and destroy it.",
@@ -1990,18 +1993,49 @@ public class UserGroupInformation {
     }
   }
 
-  public static void logAllUserInfo(UserGroupInformation ugi) throws
-      IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("UGI: " + ugi);
-      if (ugi.getRealUser() != null) {
-        LOG.debug("+RealUGI: " + ugi.getRealUser());
-      }
-      LOG.debug("+LoginUGI: " + ugi.getLoginUser());
+  /**
+   * Log current UGI and token information into specified log.
+   * @param ugi - UGI
+   * @throws IOException
+   */
+  @InterfaceAudience.LimitedPrivate({"HDFS", "KMS"})
+  @InterfaceStability.Unstable
+  public static void logUserInfo(Logger log, String caption,
+      UserGroupInformation ugi) throws IOException {
+    if (log.isDebugEnabled()) {
+      log.debug(caption + " UGI: " + ugi);
       for (Token<?> token : ugi.getTokens()) {
-        LOG.debug("+UGI token:" + token);
+        log.debug("+token:" + token);
       }
     }
+  }
+
+  /**
+   * Log all (current, real, login) UGI and token info into specified log.
+   * @param ugi - UGI
+   * @throws IOException
+   */
+  @InterfaceAudience.LimitedPrivate({"HDFS", "KMS"})
+  @InterfaceStability.Unstable
+  public static void logAllUserInfo(Logger log, UserGroupInformation ugi) throws
+      IOException {
+    if (log.isDebugEnabled()) {
+      logUserInfo(log, "Current", ugi.getCurrentUser());
+      if (ugi.getRealUser() != null) {
+        logUserInfo(log, "Real", ugi.getRealUser());
+      }
+      logUserInfo(log, "Login", ugi.getLoginUser());
+    }
+  }
+
+  /**
+   * Log all (current, real, login) UGI and token info into UGI debug log.
+   * @param ugi - UGI
+   * @throws IOException
+   */
+  public static void logAllUserInfo(UserGroupInformation ugi) throws
+      IOException {
+    logAllUserInfo(LOG, ugi);
   }
 
   private void print() throws IOException {

@@ -23,9 +23,9 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import org.apache.hadoop.fs.ContentSummary;
-import org.apache.hadoop.fs.ContentSummary.Builder;
 import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.MD5MD5CRC32CastagnoliFileChecksum;
 import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
 import org.apache.hadoop.fs.MD5MD5CRC32GzipFileChecksum;
@@ -65,6 +65,8 @@ import java.util.Map;
 
 class JsonUtilClient {
   static final DatanodeInfo[] EMPTY_DATANODE_INFO_ARRAY = {};
+  static final String UNSUPPPORTED_EXCEPTION_STR =
+      UnsupportedOperationException.class.getName();
 
   /** Convert a Json map to a RemoteException. */
   static RemoteException toRemoteException(final Map<?, ?> json) {
@@ -72,6 +74,9 @@ class JsonUtilClient {
         RemoteException.class.getSimpleName());
     final String message = (String)m.get("message");
     final String javaClassName = (String)m.get("javaClassName");
+    if (UNSUPPPORTED_EXCEPTION_STR.equals(javaClassName)) {
+      throw new UnsupportedOperationException(message);
+    }
     return new RemoteException(javaClassName, message);
   }
 
@@ -146,11 +151,23 @@ class JsonUtilClient {
     final byte storagePolicy = m.containsKey("storagePolicy") ?
         (byte) ((Number) m.get("storagePolicy")).longValue() :
         HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
-    return new HdfsFileStatus(len,
-        type == WebHdfsConstants.PathType.DIRECTORY, replication, blockSize,
-        mTime, aTime, permission, f, owner, group, symlink,
-        DFSUtilClient.string2Bytes(localName), fileId, childrenNum,
-        null, storagePolicy, null);
+    return new HdfsFileStatus.Builder()
+      .length(len)
+      .isdir(type == WebHdfsConstants.PathType.DIRECTORY)
+      .replication(replication)
+      .blocksize(blockSize)
+      .mtime(mTime)
+      .atime(aTime)
+      .perm(permission)
+      .flags(f)
+      .owner(owner)
+      .group(group)
+      .symlink(symlink)
+      .path(DFSUtilClient.string2Bytes(localName))
+      .fileId(fileId)
+      .children(childrenNum)
+      .storagePolicy(storagePolicy)
+      .build();
   }
 
   static HdfsFileStatus[] toHdfsFileStatusArray(final Map<?, ?> json) {
@@ -393,9 +410,9 @@ class JsonUtilClient {
     final long spaceQuota = ((Number) m.get("spaceQuota")).longValue();
     final Map<?, ?> typem = (Map<?, ?>) m.get("typeQuota");
 
-    Builder contentSummaryBuilder = new ContentSummary.Builder().length(length)
-        .fileCount(fileCount).directoryCount(directoryCount).quota(quota)
-        .spaceConsumed(spaceConsumed).spaceQuota(spaceQuota);
+    ContentSummary.Builder contentSummaryBuilder =new ContentSummary.Builder()
+        .length(length).fileCount(fileCount).directoryCount(directoryCount)
+        .quota(quota).spaceConsumed(spaceConsumed).spaceQuota(spaceQuota);
     if (typem != null) {
       for (StorageType t : StorageType.getTypesSupportingQuota()) {
         Map<?, ?> type = (Map<?, ?>) typem.get(t.toString());
@@ -644,4 +661,36 @@ class JsonUtilClient {
     }
   }
 
+  /*
+   * The parameters which have default value -1 are required fields according
+   * to hdfs.proto.
+   * The default values for optional fields are taken from
+   * hdfs.proto#FsServerDefaultsProto.
+   */
+  public static FsServerDefaults toFsServerDefaults(final Map<?, ?> json) {
+    if (json == null) {
+      return null;
+    }
+    Map<?, ?> m =
+        (Map<?, ?>) json.get(FsServerDefaults.class.getSimpleName());
+    long blockSize =  getLong(m, "blockSize", -1);
+    int bytesPerChecksum = getInt(m, "bytesPerChecksum", -1);
+    int writePacketSize = getInt(m, "writePacketSize", -1);
+    short replication = (short) getInt(m, "replication", -1);
+    int fileBufferSize = getInt(m, "fileBufferSize", -1);
+    boolean encryptDataTransfer = m.containsKey("encryptDataTransfer")
+        ? (Boolean) m.get("encryptDataTransfer")
+        : false;
+    long trashInterval = getLong(m, "trashInterval", 0);
+    DataChecksum.Type type =
+        DataChecksum.Type.valueOf(getInt(m, "checksumType", 1));
+    String keyProviderUri = (String) m.get("keyProviderUri");
+    byte storagepolicyId = m.containsKey("defaultStoragePolicyId")
+        ? ((Number) m.get("defaultStoragePolicyId")).byteValue()
+        : HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
+    return new FsServerDefaults(blockSize, bytesPerChecksum,
+        writePacketSize, replication, fileBufferSize,
+        encryptDataTransfer, trashInterval, type, keyProviderUri,
+        storagepolicyId);
+  }
 }

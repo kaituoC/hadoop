@@ -26,6 +26,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.Capacity
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairSchedulerConfiguration;
 
+import org.junit.After;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -89,7 +90,8 @@ public abstract class ParameterizedSchedulerTestBase {
     }
   }
 
-  private void configureFairScheduler(YarnConfiguration conf) throws IOException {
+  protected void configureFairScheduler(YarnConfiguration conf)
+      throws IOException {
     // Disable queueMaxAMShare limitation for fair scheduler
     PrintWriter out = new PrintWriter(new FileWriter(FS_ALLOC_FILE));
     out.println("<?xml version=\"1.0\"?>");
@@ -108,6 +110,13 @@ public abstract class ParameterizedSchedulerTestBase {
 
     conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, FS_ALLOC_FILE);
     conf.setLong(FairSchedulerConfiguration.UPDATE_INTERVAL_MS, 10);
+  }
+
+  @After
+  public void tearDown() {
+    if (schedulerType == SchedulerType.FAIR) {
+      (new File(FS_ALLOC_FILE)).delete();
+    }
   }
 
   public SchedulerType getSchedulerType() {
