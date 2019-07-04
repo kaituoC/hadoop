@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -47,6 +48,8 @@ import javax.management.ObjectName;
 import javax.management.StandardMBean;
 
 import com.google.common.annotations.VisibleForTesting;
+
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
@@ -237,6 +240,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   final FsDatasetCache cacheManager;
   private final Configuration conf;
   private final int volFailuresTolerated;
+  private final int volsConfigured;
   private volatile boolean fsRunning;
 
   final ReplicaMap volumeMap;
@@ -285,15 +289,32 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
     List<VolumeFailureInfo> volumeFailureInfos = getInitialVolumeFailureInfos(
         dataLocations, storage);
 
-    int volsConfigured = datanode.getDnConf().getVolsConfigured();
+    volsConfigured = datanode.getDnConf().getVolsConfigured();
     int volsFailed = volumeFailureInfos.size();
 
-    if (volsFailed > volFailuresTolerated) {
-      throw new DiskErrorException("Too many failed volumes - "
-          + "current valid volumes: " + storage.getNumStorageDirs() 
-          + ", volumes configured: " + volsConfigured 
-          + ", volumes failed: " + volsFailed
-          + ", volume failures tolerated: " + volFailuresTolerated);
+    if (volFailuresTolerated < DataNode.MAX_VOLUME_FAILURE_TOLERATED_LIMIT
+        || volFailuresTolerated >= volsConfigured) {
+      throw new HadoopIllegalArgumentException("Invalid value configured for "
+          + "dfs.datanode.failed.volumes.tolerated - " + volFailuresTolerated
+          + ". Value configured is either less than maxVolumeFailureLimit or greater than "
+          + "to the number of configured volumes (" + volsConfigured + ").");
+    }
+    if (volFailuresTolerated == DataNode.MAX_VOLUME_FAILURE_TOLERATED_LIMIT) {
+      if (volsConfigured == volsFailed) {
+        throw new DiskErrorException(
+            "Too many failed volumes - " + "current valid volumes: "
+                + storage.getNumStorageDirs() + ", volumes configured: "
+                + volsConfigured + ", volumes failed: " + volsFailed
+                + ", volume failures tolerated: " + volFailuresTolerated);
+      }
+    } else {
+      if (volsFailed > volFailuresTolerated) {
+        throw new DiskErrorException(
+            "Too many failed volumes - " + "current valid volumes: "
+                + storage.getNumStorageDirs() + ", volumes configured: "
+                + volsConfigured + ", volumes failed: " + volsFailed
+                + ", volume failures tolerated: " + volFailuresTolerated);
+      }
     }
 
     storageMap = new ConcurrentHashMap<String, DatanodeStorage>();
@@ -401,7 +422,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
         LOG.error(errorMsg);
         throw new IOException(errorMsg);
       }
-      volumeMap.addAll(replicaMap);
+      volumeMap.mergeAll(replicaMap);
       storageMap.put(sd.getStorageUuid(),
           new DatanodeStorage(sd.getStorageUuid(),
               DatanodeStorage.State.NORMAL,
@@ -597,7 +618,13 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    */
   @Override // FsDatasetSpi
   public boolean hasEnoughResource() {
-    return getNumFailedVolumes() <= volFailuresTolerated;
+    if (volFailuresTolerated == DataNode.MAX_VOLUME_FAILURE_TOLERATED_LIMIT) {
+      // If volFailuresTolerated configured maxVolumeFailureLimit then minimum
+      // one volume is required.
+      return volumes.getVolumes().size() >= 1;
+    } else {
+      return getNumFailedVolumes() <= volFailuresTolerated;
+    }
   }
 
   /**
@@ -763,11 +790,33 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
       datanode.getMetrics().incrRamDiskBlocksReadHits();
     }
 
-    if(info != null && info.blockDataExists()) {
-      return info.getDataInputStream(seekOffset);
-    } else {
+    if (info == null) {
       throw new IOException("No data exists for block " + b);
     }
+    return getBlockInputStreamWithCheckingPmemCache(info, b, seekOffset);
+  }
+
+  /**
+   * Check whether the replica is cached to persistent memory.
+   * If so, get DataInputStream of the corresponding cache file on pmem.
+   */
+  private InputStream getBlockInputStreamWithCheckingPmemCache(
+      ReplicaInfo info, ExtendedBlock b, long seekOffset) throws IOException {
+    String cachePath = cacheManager.getReplicaCachePath(
+        b.getBlockPoolId(), b.getBlockId());
+    if (cachePath != null) {
+      long addr = cacheManager.getCacheAddress(
+          b.getBlockPoolId(), b.getBlockId());
+      if (addr != -1) {
+        LOG.debug("Get InputStream by cache address.");
+        return FsDatasetUtil.getDirectInputStream(
+            addr, info.getBlockDataLength());
+      }
+      LOG.debug("Get InputStream by cache file path.");
+      return FsDatasetUtil.getInputStreamAndSeek(
+          new File(cachePath), seekOffset);
+    }
+    return info.getDataInputStream(seekOffset);
   }
 
   /**
@@ -970,7 +1019,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    * @return newReplicaInfo
    * @throws IOException
    */
-  private ReplicaInfo moveBlock(ExtendedBlock block, ReplicaInfo replicaInfo,
+  @VisibleForTesting
+  ReplicaInfo moveBlock(ExtendedBlock block, ReplicaInfo replicaInfo,
       FsVolumeReference volumeRef) throws IOException {
     ReplicaInfo newReplicaInfo = copyReplicaToVolume(block, replicaInfo,
         volumeRef);
@@ -1110,7 +1160,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
         }
       }
       metaOut = new DataOutputStream(new BufferedOutputStream(
-          new FileOutputStream(dstMeta), smallBufferSize));
+          Files.newOutputStream(dstMeta.toPath()), smallBufferSize));
       BlockMetadataHeader.writeHeader(metaOut, checksum);
 
       int offset = 0;
@@ -1372,6 +1422,9 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
           datanode.getMetrics().incrRamDiskBlocksWrite();
         } catch (DiskOutOfSpaceException de) {
           // Ignore the exception since we just fall back to persistent storage.
+          LOG.warn("Insufficient space for placing the block on a transient "
+              + "volume, fall back to persistent storage: "
+              + de.getMessage());
         } finally {
           if (ref == null) {
             cacheManager.release(b.getNumBytes());
@@ -1926,6 +1979,10 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    */
   @Override // FsDatasetSpi
   public boolean isValidBlock(ExtendedBlock b) {
+    // If block passed is null, we should return false.
+    if (b == null) {
+      return false;
+    }
     return isValid(b, ReplicaState.FINALIZED);
   }
   
@@ -1934,6 +1991,10 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    */
   @Override // {@link FsDatasetSpi}
   public boolean isValidRbw(final ExtendedBlock b) {
+    // If block passed is null, we should return false.
+    if (b == null) {
+      return false;
+    }
     return isValid(b, ReplicaState.RBW);
   }
 
@@ -2277,6 +2338,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
                      "from LazyWriter.join");
       }
     }
+
+    cacheManager.shutdown();
   }
 
   @Override // FSDatasetMBean
@@ -2302,10 +2365,8 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
    * the disk, update {@link ReplicaInfo} with the correct file</li>
    * </ul>
    *
-   * @param blockId Block that differs
-   * @param diskFile Block file on the disk
-   * @param diskMetaFile Metadata file from on the disk
-   * @param vol Volume of the block file
+   * @param bpid block pool ID
+   * @param scanInfo {@link ScanInfo} for a given block
    */
   @Override
   public void checkAndUpdate(String bpid, ScanInfo scanInfo)
@@ -3271,6 +3332,20 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
   @VisibleForTesting
   public void setTimer(Timer newTimer) {
     this.timer = newTimer;
+  }
+
+  /**
+   * Return the number of BP service count.
+   */
+  public int getBPServiceCount() {
+    return datanode.getBpOsCount();
+  }
+
+  /**
+   * Return the number of volume.
+   */
+  public int getVolumeCount() {
+    return volumes.getVolumes().size();
   }
 
   void stopAllDataxceiverThreads(FsVolumeImpl volume) {

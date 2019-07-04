@@ -20,7 +20,7 @@ package org.apache.hadoop.fs.s3a;
 
 import com.amazonaws.services.s3.model.ListObjectsV2Request;
 import com.amazonaws.services.s3.model.ListObjectsV2Result;
-import com.amazonaws.services.s3.AmazonS3;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -29,19 +29,25 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.contract.AbstractFSContract;
 import org.apache.hadoop.fs.contract.s3a.S3AContract;
+
+import com.google.common.collect.Lists;
 import org.junit.Assume;
 import org.junit.Test;
 
 import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.apache.hadoop.fs.contract.ContractTestUtils.touch;
 import static org.apache.hadoop.fs.contract.ContractTestUtils.writeTextFile;
 import static org.apache.hadoop.fs.s3a.Constants.*;
+import static org.apache.hadoop.fs.s3a.FailureInjectionPolicy.*;
 import static org.apache.hadoop.fs.s3a.InconsistentAmazonS3Client.*;
+import static org.apache.hadoop.test.LambdaTestUtils.intercept;
 
 /**
  * Test S3Guard list consistency feature by injecting delayed listObjects()
@@ -70,7 +76,9 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
     // Other configs would break test assumptions
     conf.set(FAIL_INJECT_INCONSISTENCY_KEY, DEFAULT_DELAY_KEY_SUBSTRING);
     conf.setFloat(FAIL_INJECT_INCONSISTENCY_PROBABILITY, 1.0f);
-    conf.setLong(FAIL_INJECT_INCONSISTENCY_MSEC, DEFAULT_DELAY_KEY_MSEC);
+    // this is a long value to guarantee that the inconsistency holds
+    // even over long-haul connections, and in the debugger too/
+    conf.setLong(FAIL_INJECT_INCONSISTENCY_MSEC, (long) (60 * 1000));
     return new S3AContract(conf);
   }
 
@@ -172,7 +180,8 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
   public void testConsistentListAfterDelete() throws Exception {
     S3AFileSystem fs = getFileSystem();
     // test will fail if NullMetadataStore (the default) is configured: skip it.
-    Assume.assumeTrue(fs.hasMetadataStore());
+    Assume.assumeTrue("FS needs to have a metadatastore.",
+        fs.hasMetadataStore());
 
     // Any S3 keys that contain DELAY_KEY_SUBSTRING will be delayed
     // in listObjects() results via InconsistentS3Client
@@ -184,11 +193,11 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
         inconsistentPath};
 
     for (Path path : testDirs) {
-      assertTrue(fs.mkdirs(path));
+      assertTrue("Can't create directory: " + path, fs.mkdirs(path));
     }
     clearInconsistency(fs);
     for (Path path : testDirs) {
-      assertTrue(fs.delete(path, false));
+      assertTrue("Can't delete path: " + path, fs.delete(path, false));
     }
 
     FileStatus[] paths = fs.listStatus(path("a/b/"));
@@ -196,10 +205,13 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
     for (FileStatus fileState : paths) {
       list.add(fileState.getPath());
     }
-    assertFalse(list.contains(path("a/b/dir1")));
-    assertFalse(list.contains(path("a/b/dir2")));
-    // This should fail without S3Guard, and succeed with it.
-    assertFalse(list.contains(inconsistentPath));
+
+    assertFalse("This path should be deleted.",
+        list.contains(path("a/b/dir1")));
+    assertFalse("This path should be deleted.",
+        list.contains(path("a/b/dir2")));
+    assertFalse("This should fail without S3Guard, and succeed with it.",
+        list.contains(inconsistentPath));
   }
 
   /**
@@ -242,13 +254,11 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
     assertFalse(list.contains(path("a3/b/dir3-" +
         DEFAULT_DELAY_KEY_SUBSTRING)));
 
-    try {
-      RemoteIterator<LocatedFileStatus> old = fs.listFilesAndEmptyDirectories(
-          path("a"), true);
-      fail("Recently renamed dir should not be visible");
-    } catch(FileNotFoundException e) {
-      // expected
-    }
+    intercept(FileNotFoundException.class, "",
+        "Recently renamed dir should not be visible",
+        () -> S3AUtils.mapLocatedFiles(
+            fs.listFilesAndEmptyDirectories(path("a"), true),
+            FileStatus::getPath));
   }
 
   @Test
@@ -523,40 +533,100 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
 
     ListObjectsV2Result postDeleteDelimited = listObjectsV2(fs, key, "/");
     ListObjectsV2Result postDeleteUndelimited = listObjectsV2(fs, key, null);
+    assertListSizeEqual(
+        "InconsistentAmazonS3Client added back objects incorrectly " +
+            "in a non-recursive listing",
+        preDeleteDelimited.getObjectSummaries(),
+        postDeleteDelimited.getObjectSummaries());
 
-    assertEquals("InconsistentAmazonS3Client added back objects incorrectly " +
+    assertListSizeEqual("InconsistentAmazonS3Client added back prefixes incorrectly " +
             "in a non-recursive listing",
-        preDeleteDelimited.getObjectSummaries().size(),
-        postDeleteDelimited.getObjectSummaries().size()
+        preDeleteDelimited.getCommonPrefixes(),
+        postDeleteDelimited.getCommonPrefixes()
     );
-    assertEquals("InconsistentAmazonS3Client added back prefixes incorrectly " +
-            "in a non-recursive listing",
-        preDeleteDelimited.getCommonPrefixes().size(),
-        postDeleteDelimited.getCommonPrefixes().size()
-    );
-    assertEquals("InconsistentAmazonS3Client added back objects incorrectly " +
+    assertListSizeEqual("InconsistentAmazonS3Client added back objects incorrectly " +
             "in a recursive listing",
-        preDeleteUndelimited.getObjectSummaries().size(),
-        postDeleteUndelimited.getObjectSummaries().size()
+        preDeleteUndelimited.getObjectSummaries(),
+        postDeleteUndelimited.getObjectSummaries()
     );
-    assertEquals("InconsistentAmazonS3Client added back prefixes incorrectly " +
+
+    assertListSizeEqual("InconsistentAmazonS3Client added back prefixes incorrectly " +
             "in a recursive listing",
-        preDeleteUndelimited.getCommonPrefixes().size(),
-        postDeleteUndelimited.getCommonPrefixes().size()
+        preDeleteUndelimited.getCommonPrefixes(),
+        postDeleteUndelimited.getCommonPrefixes()
     );
   }
 
   /**
-   * retrying v2 list.
-   * @param fs
-   * @param key
-   * @param delimiter
-   * @return
-   * @throws IOException
+   * Tests that the file's eTag and versionId are preserved in recursive
+   * listings.
    */
+  @Test
+  public void testListingReturnsVersionMetadata() throws Throwable {
+    S3AFileSystem fs = getFileSystem();
+    Assume.assumeTrue(fs.hasMetadataStore());
 
+    // write simple file
+    Path file = path("file1");
+    try (FSDataOutputStream outputStream = fs.create(file)) {
+      outputStream.writeChars("hello");
+    }
+
+    // get individual file status
+    FileStatus[] fileStatuses = fs.listStatus(file);
+    assertEquals(1, fileStatuses.length);
+    S3AFileStatus status = (S3AFileStatus) fileStatuses[0];
+    String eTag = status.getETag();
+    String versionId = status.getVersionId();
+
+    // get status through recursive directory listing
+    RemoteIterator<LocatedFileStatus> filesIterator = fs.listFiles(
+        file.getParent(), true);
+    List<LocatedFileStatus> files = Lists.newArrayList();
+    while (filesIterator.hasNext()) {
+      files.add(filesIterator.next());
+    }
+    assertEquals(1, files.size());
+
+    // ensure eTag and versionId are preserved in directory listing
+    S3ALocatedFileStatus locatedFileStatus =
+        (S3ALocatedFileStatus) files.get(0);
+    assertEquals(eTag, locatedFileStatus.getETag());
+    assertEquals(versionId, locatedFileStatus.getVersionId());
+  }
+
+  /**
+   * Assert that the two list sizes match; failure message includes the lists.
+   * @param message text for the assertion
+   * @param expected expected list
+   * @param actual actual list
+   * @param <T> type of list
+   */
+  private <T> void assertListSizeEqual(String message,
+      List<T> expected,
+      List<T> actual) {
+    String leftContents = expected.stream()
+        .map(n -> n.toString())
+        .collect(Collectors.joining("\n"));
+    String rightContents = actual.stream()
+        .map(n -> n.toString())
+        .collect(Collectors.joining("\n"));
+    String summary = "\nExpected:" + leftContents
+        + "\n-----------\nActual:" + rightContents;
+    assertEquals(message + summary, expected.size(), actual.size());
+  }
+
+  /**
+   * Retrying v2 list directly through the s3 client.
+   * @param fs filesystem
+   * @param key key to list under
+   * @param delimiter any delimiter
+   * @return the listing
+   * @throws IOException on error
+   */
+  @Retries.RetryRaw
   private ListObjectsV2Result listObjectsV2(S3AFileSystem fs,
-      String key, String delimiter) throws java.io.IOException {
+      String key, String delimiter) throws IOException {
     ListObjectsV2Request k = fs.createListObjectsRequest(key, delimiter)
         .getV2();
     return invoker.retryUntranslated("list", true,
@@ -565,9 +635,4 @@ public class ITestS3GuardListConsistency extends AbstractS3ATestBase {
         });
   }
 
-  private static void clearInconsistency(S3AFileSystem fs) throws Exception {
-    AmazonS3 s3 = fs.getAmazonS3ClientForTesting("s3guard");
-    InconsistentAmazonS3Client ic = InconsistentAmazonS3Client.castFrom(s3);
-    ic.clearInconsistency();
-  }
 }

@@ -17,9 +17,6 @@
  */
 package org.apache.hadoop.http;
 
-import static org.apache.hadoop.fs.CommonConfigurationKeys.DEFAULT_HADOOP_HTTP_STATIC_USER;
-import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_HTTP_STATIC_USER;
-
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -30,6 +27,7 @@ import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -37,6 +35,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -67,6 +67,8 @@ import org.apache.hadoop.security.AuthenticationFilterInitializer;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
+import org.apache.hadoop.security.authentication.server.ProxyUserAuthenticationFilterInitializer;
+import org.apache.hadoop.security.authentication.server.PseudoAuthenticationHandler;
 import org.apache.hadoop.security.authentication.util.SignerSecretProvider;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.ssl.SSLFactory;
@@ -85,12 +87,12 @@ import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.server.SessionManager;
 import org.eclipse.jetty.server.SslConnectionFactory;
+import org.eclipse.jetty.server.handler.AllowSymLinkAliasChecker;
 import org.eclipse.jetty.server.handler.ContextHandlerCollection;
 import org.eclipse.jetty.server.handler.HandlerCollection;
 import org.eclipse.jetty.server.handler.RequestLogHandler;
 import org.eclipse.jetty.server.session.AbstractSessionManager;
 import org.eclipse.jetty.server.session.SessionHandler;
-import org.eclipse.jetty.servlet.DefaultServlet;
 import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.FilterMapping;
 import org.eclipse.jetty.servlet.ServletContextHandler;
@@ -108,9 +110,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Create a Jetty embedded server to answer http requests. The primary goal is
  * to serve up status information for the server. There are three contexts:
- * "/logs/" -> points to the log directory "/static/" -> points to common static
- * files (src/webapps/static) "/" -> the jsp server code from
- * (src/webapps/<name>)
+ * "/logs/" {@literal ->} points to the log directory "/static/" {@literal ->}
+ * points to common static files (src/webapps/static) "/" {@literal ->} the
+ * jsp server code from (src/webapps/{@literal <}name{@literal >})
  *
  * This class is a fork of the old HttpServer. HttpServer exists for
  * compatibility reasons. See HBASE-10336 for more details.
@@ -134,6 +136,18 @@ public final class HttpServer2 implements FilterContainer {
       "hadoop.http.socket.backlog.size";
   public static final int HTTP_SOCKET_BACKLOG_SIZE_DEFAULT = 128;
   public static final String HTTP_MAX_THREADS_KEY = "hadoop.http.max.threads";
+  public static final String HTTP_ACCEPTOR_COUNT_KEY =
+      "hadoop.http.acceptor.count";
+  // -1 to use default behavior of setting count based on CPU core count
+  public static final int HTTP_ACCEPTOR_COUNT_DEFAULT = -1;
+  public static final String HTTP_SELECTOR_COUNT_KEY =
+      "hadoop.http.selector.count";
+  // -1 to use default behavior of setting count based on CPU core count
+  public static final int HTTP_SELECTOR_COUNT_DEFAULT = -1;
+  // idle timeout in milliseconds
+  public static final String HTTP_IDLE_TIMEOUT_MS_KEY =
+      "hadoop.http.idle_timeout.ms";
+  public static final int HTTP_IDLE_TIMEOUT_MS_DEFAULT = 10000;
   public static final String HTTP_TEMP_DIR_KEY = "hadoop.http.temp.dir";
 
   public static final String FILTER_INITIALIZER_PROPERTY
@@ -143,7 +157,7 @@ public final class HttpServer2 implements FilterContainer {
   // gets stored.
   public static final String CONF_CONTEXT_ATTRIBUTE = "hadoop.conf";
   public static final String ADMINS_ACL = "admins.acl";
-  public static final String SPNEGO_FILTER = "SpnegoFilter";
+  public static final String SPNEGO_FILTER = "authentication";
   public static final String NO_CACHE_FILTER = "NoCacheFilter";
 
   public static final String BIND_ADDRESS = "bind.address";
@@ -167,10 +181,16 @@ public final class HttpServer2 implements FilterContainer {
   private final SignerSecretProvider secretProvider;
   private XFrameOption xFrameOption;
   private boolean xFrameOptionIsEnabled;
-  private static final String X_FRAME_VALUE = "xFrameOption";
-  private static final String X_FRAME_ENABLED = "X_FRAME_ENABLED";
-
-
+  public static final String HTTP_HEADER_PREFIX = "hadoop.http.header.";
+  private static final String HTTP_HEADER_REGEX =
+          "hadoop\\.http\\.header\\.([a-zA-Z\\-_]+)";
+  static final String X_XSS_PROTECTION  =
+          "X-XSS-Protection:1; mode=block";
+  static final String X_CONTENT_TYPE_OPTIONS =
+          "X-Content-Type-Options:nosniff";
+  private static final String X_FRAME_OPTIONS = "X-FRAME-OPTIONS";
+  private static final Pattern PATTERN_HTTP_HEADER_REGEX =
+          Pattern.compile(HTTP_HEADER_REGEX);
   /**
    * Class to construct instances of HTTP server with specific options.
    */
@@ -415,7 +435,9 @@ public final class HttpServer2 implements FilterContainer {
 
       HttpServer2 server = new HttpServer2(this);
 
-      if (this.securityEnabled) {
+      if (this.securityEnabled &&
+          !this.conf.get(authFilterConfigurationPrefix + "type").
+          equals(PseudoAuthenticationHandler.TYPE)) {
         server.initSpnego(conf, hostName, usernameConfKey, keytabConfKey);
       }
 
@@ -432,6 +454,8 @@ public final class HttpServer2 implements FilterContainer {
       int responseHeaderSize = conf.getInt(
           HTTP_MAX_RESPONSE_HEADER_SIZE_KEY,
           HTTP_MAX_RESPONSE_HEADER_SIZE_DEFAULT);
+      int idleTimeout = conf.getInt(HTTP_IDLE_TIMEOUT_MS_KEY,
+          HTTP_IDLE_TIMEOUT_MS_DEFAULT);
 
       HttpConfiguration httpConfig = new HttpConfiguration();
       httpConfig.setRequestHeaderSize(requestHeaderSize);
@@ -457,6 +481,7 @@ public final class HttpServer2 implements FilterContainer {
         connector.setHost(ep.getHost());
         connector.setPort(ep.getPort() == -1 ? 0 : ep.getPort());
         connector.setAcceptQueueSize(backlogSize);
+        connector.setIdleTimeout(idleTimeout);
         server.addListener(connector);
       }
       server.loadListeners();
@@ -465,10 +490,18 @@ public final class HttpServer2 implements FilterContainer {
 
     private ServerConnector createHttpChannelConnector(
         Server server, HttpConfiguration httpConfig) {
-      ServerConnector conn = new ServerConnector(server);
+      ServerConnector conn = new ServerConnector(server,
+          conf.getInt(HTTP_ACCEPTOR_COUNT_KEY, HTTP_ACCEPTOR_COUNT_DEFAULT),
+          conf.getInt(HTTP_SELECTOR_COUNT_KEY, HTTP_SELECTOR_COUNT_DEFAULT));
       ConnectionFactory connFactory = new HttpConnectionFactory(httpConfig);
       conn.addConnectionFactory(connFactory);
-      configureChannelConnector(conn);
+      if(Shell.WINDOWS) {
+        // result of setting the SO_REUSEADDR flag is different on Windows
+        // http://msdn.microsoft.com/en-us/library/ms740621(v=vs.85).aspx
+        // without this 2 NN's can start on the same machine and listen on
+        // the same port with indeterminate routing of incoming requests to them
+        conn.setReuseAddress(false);
+      }
       return conn;
     }
 
@@ -567,10 +600,7 @@ public final class HttpServer2 implements FilterContainer {
     addDefaultApps(contexts, appDir, conf);
     webServer.setHandler(handlers);
 
-    Map<String, String> xFrameParams = new HashMap<>();
-    xFrameParams.put(X_FRAME_ENABLED,
-        String.valueOf(this.xFrameOptionIsEnabled));
-    xFrameParams.put(X_FRAME_VALUE,  this.xFrameOption.toString());
+    Map<String, String> xFrameParams = setHeaders(conf);
     addGlobalFilter("safety", QuotingInputFilter.class.getName(), xFrameParams);
     final FilterInitializer[] initializers = getFilterInitializers(conf);
     if (initializers != null) {
@@ -582,13 +612,6 @@ public final class HttpServer2 implements FilterContainer {
     }
 
     addDefaultServlets();
-
-    if (pathSpecs != null) {
-      for (String path : pathSpecs) {
-        LOG.info("adding path spec: " + path);
-        addFilterPathMapping(path, webAppContext);
-      }
-    }
   }
 
   private void addListener(ServerConnector connector) {
@@ -599,7 +622,7 @@ public final class HttpServer2 implements FilterContainer {
       AccessControlList adminsAcl, final String appDir) {
     WebAppContext ctx = new WebAppContext();
     ctx.setDefaultsDescriptor(null);
-    ServletHolder holder = new ServletHolder(new DefaultServlet());
+    ServletHolder holder = new ServletHolder(new WebServlet());
     Map<String, String> params = ImmutableMap. <String, String> builder()
             .put("acceptRanges", "true")
             .put("dirAllowed", "false")
@@ -647,17 +670,6 @@ public final class HttpServer2 implements FilterContainer {
                  Collections.<String, String> emptyMap(), new String[] { "/*" });
   }
 
-  private static void configureChannelConnector(ServerConnector c) {
-    c.setIdleTimeout(10000);
-    if(Shell.WINDOWS) {
-      // result of setting the SO_REUSEADDR flag is different on Windows
-      // http://msdn.microsoft.com/en-us/library/ms740621(v=vs.85).aspx
-      // without this 2 NN's can start on the same machine and listen on
-      // the same port with indeterminate routing of incoming requests to them
-      c.setReuseAddress(false);
-    }
-  }
-
   /** Get an array of FilterConfiguration specified in the conf */
   private static FilterInitializer[] getFilterInitializers(Configuration conf) {
     if (conf == null) {
@@ -669,10 +681,16 @@ public final class HttpServer2 implements FilterContainer {
       return null;
     }
 
-    FilterInitializer[] initializers = new FilterInitializer[classes.length];
-    for(int i = 0; i < classes.length; i++) {
+    List<Class<?>> classList = new ArrayList<>(Arrays.asList(classes));
+    if (classList.contains(AuthenticationFilterInitializer.class) &&
+        classList.contains(ProxyUserAuthenticationFilterInitializer.class)) {
+      classList.remove(AuthenticationFilterInitializer.class);
+    }
+
+    FilterInitializer[] initializers = new FilterInitializer[classList.size()];
+    for(int i = 0; i < classList.size(); i++) {
       initializers[i] = (FilterInitializer)ReflectionUtils.newInstance(
-          classes[i], conf);
+          classList.get(i), conf);
     }
     return initializers;
   }
@@ -711,6 +729,7 @@ public final class HttpServer2 implements FilterContainer {
         asm.getSessionCookieConfig().setSecure(true);
       }
       logContext.setSessionHandler(handler);
+      logContext.addAliasCheck(new AllowSymLinkAliasChecker());
       setContextAttributes(logContext, conf);
       addNoCacheFilter(logContext);
       defaultContexts.put(logContext, true);
@@ -719,7 +738,7 @@ public final class HttpServer2 implements FilterContainer {
     ServletContextHandler staticContext =
         new ServletContextHandler(parent, "/static");
     staticContext.setResourceBase(appDir + "/static");
-    staticContext.addServlet(DefaultServlet.class, "/*");
+    staticContext.addServlet(WebServlet.class, "/*");
     staticContext.setDisplayName("static");
     @SuppressWarnings("unchecked")
     Map<String, String> params = staticContext.getInitParams();
@@ -733,6 +752,7 @@ public final class HttpServer2 implements FilterContainer {
       asm.getSessionCookieConfig().setSecure(true);
     }
     staticContext.setSessionHandler(handler);
+    staticContext.addAliasCheck(new AllowSymLinkAliasChecker());
     setContextAttributes(staticContext, conf);
     defaultContexts.put(staticContext, true);
   }
@@ -795,7 +815,6 @@ public final class HttpServer2 implements FilterContainer {
   public void addServlet(String name, String pathSpec,
       Class<? extends HttpServlet> clazz) {
     addInternalServlet(name, pathSpec, clazz, false);
-    addFilterPathMapping(pathSpec, webAppContext);
   }
 
   /**
@@ -852,16 +871,6 @@ public final class HttpServer2 implements FilterContainer {
       }
     }
     webAppContext.addServlet(holder, pathSpec);
-
-    if(requireAuth && UserGroupInformation.isSecurityEnabled()) {
-      LOG.info("Adding Kerberos (SPNEGO) filter to " + name);
-      ServletHandler handler = webAppContext.getServletHandler();
-      FilterMapping fmap = new FilterMapping();
-      fmap.setPathSpec(pathSpec);
-      fmap.setFilterName(SPNEGO_FILTER);
-      fmap.setDispatches(FilterMapping.ALL);
-      handler.addFilterMapping(fmap);
-    }
   }
 
   /**
@@ -928,8 +937,8 @@ public final class HttpServer2 implements FilterContainer {
       Map<String, String> parameters) {
 
     FilterHolder filterHolder = getFilterHolder(name, classname, parameters);
-    final String[] USER_FACING_URLS = { "*.html", "*.jsp" };
-    FilterMapping fmap = getFilterMapping(name, USER_FACING_URLS);
+    final String[] userFacingUrls = {"/", "/*" };
+    FilterMapping fmap = getFilterMapping(name, userFacingUrls);
     defineFilter(webAppContext, filterHolder, fmap);
     LOG.info(
         "Added filter " + name + " (class=" + classname + ") to context "
@@ -1112,7 +1121,6 @@ public final class HttpServer2 implements FilterContainer {
       params.put("kerberos.keytab", httpKeytab);
     }
     params.put(AuthenticationFilter.AUTH_TYPE, "kerberos");
-
     defineFilter(webAppContext, SPNEGO_FILTER,
                  AuthenticationFilter.class.getName(), params, null);
   }
@@ -1349,29 +1357,11 @@ public final class HttpServer2 implements FilterContainer {
   }
 
   /**
-   * check whether user is static and unauthenticated, if the
-   * answer is TRUE, that means http sever is in non-security
-   * environment.
-   * @param servletContext the servlet context.
-   * @param request the servlet request.
-   * @return TRUE/FALSE based on the logic described above.
-   */
-  public static boolean isStaticUserAndNoneAuthType(
-      ServletContext servletContext, HttpServletRequest request) {
-    Configuration conf =
-        (Configuration) servletContext.getAttribute(CONF_CONTEXT_ATTRIBUTE);
-    final String authType = request.getAuthType();
-    final String staticUser = conf.get(HADOOP_HTTP_STATIC_USER,
-        DEFAULT_HADOOP_HTTP_STATIC_USER);
-    return authType == null && staticUser.equals(request.getRemoteUser());
-  }
-
-  /**
    * Checks the user has privileges to access to instrumentation servlets.
-   * <p/>
+   * <p>
    * If <code>hadoop.security.instrumentation.requires.admin</code> is set to FALSE
    * (default value) it always returns TRUE.
-   * <p/>
+   * <p>
    * If <code>hadoop.security.instrumentation.requires.admin</code> is set to TRUE
    * it will check that if the current user is in the admin ACLS. If the user is
    * in the admin ACLs it returns TRUE, otherwise it returns FALSE.
@@ -1426,8 +1416,11 @@ public final class HttpServer2 implements FilterContainer {
 
     if (servletContext.getAttribute(ADMINS_ACL) != null &&
         !userHasAdministratorAccess(servletContext, remoteUser)) {
-      response.sendError(HttpServletResponse.SC_FORBIDDEN, "User "
-          + remoteUser + " is unauthorized to access this page.");
+      response.sendError(HttpServletResponse.SC_FORBIDDEN,
+          "Unauthenticated users are not " +
+              "authorized to access this page.");
+      LOG.warn("User " + remoteUser + " is unauthorized to access the page "
+          + request.getRequestURI() + ".");
       return false;
     }
 
@@ -1463,14 +1456,9 @@ public final class HttpServer2 implements FilterContainer {
 
     @Override
     public void doGet(HttpServletRequest request, HttpServletResponse response)
-        throws ServletException, IOException {
-      // If user is a static user and auth Type is null, that means
-      // there is a non-security environment and no need authorization,
-      // otherwise, do the authorization.
-      final ServletContext servletContext = getServletContext();
-      if (!HttpServer2.isStaticUserAndNoneAuthType(servletContext, request) &&
-          !HttpServer2.isInstrumentationAccessAllowed(servletContext,
-              request, response)) {
+      throws ServletException, IOException {
+      if (!HttpServer2.isInstrumentationAccessAllowed(getServletContext(),
+                                                      request, response)) {
         return;
       }
       response.setContentType("text/plain; charset=UTF-8");
@@ -1491,9 +1479,11 @@ public final class HttpServer2 implements FilterContainer {
   public static class QuotingInputFilter implements Filter {
 
     private FilterConfig config;
+    private Map<String, String> headerMap;
 
     public static class RequestQuoter extends HttpServletRequestWrapper {
       private final HttpServletRequest rawRequest;
+
       public RequestQuoter(HttpServletRequest rawRequest) {
         super(rawRequest);
         this.rawRequest = rawRequest;
@@ -1582,6 +1572,7 @@ public final class HttpServer2 implements FilterContainer {
     @Override
     public void init(FilterConfig config) throws ServletException {
       this.config = config;
+      initHttpHeaderMap();
     }
 
     @Override
@@ -1609,11 +1600,7 @@ public final class HttpServer2 implements FilterContainer {
       } else if (mime.startsWith("application/xml")) {
         httpResponse.setContentType("text/xml; charset=utf-8");
       }
-
-      if(Boolean.valueOf(this.config.getInitParameter(X_FRAME_ENABLED))) {
-        httpResponse.addHeader("X-FRAME-OPTIONS",
-            this.config.getInitParameter(X_FRAME_VALUE));
-      }
+      headerMap.forEach((k, v) -> httpResponse.addHeader(k, v));
       chain.doFilter(quoted, httpResponse);
     }
 
@@ -1629,14 +1616,25 @@ public final class HttpServer2 implements FilterContainer {
       return (mime == null) ? null : mime;
     }
 
+    private void initHttpHeaderMap() {
+      Enumeration<String> params = this.config.getInitParameterNames();
+      headerMap = new HashMap<>();
+      while (params.hasMoreElements()) {
+        String key = params.nextElement();
+        Matcher m = PATTERN_HTTP_HEADER_REGEX.matcher(key);
+        if (m.matches()) {
+          String headerKey = m.group(1);
+          headerMap.put(headerKey, config.getInitParameter(key));
+        }
+      }
+    }
   }
-
-  /**
-   * The X-FRAME-OPTIONS header in HTTP response to mitigate clickjacking
-   * attack.
-   */
+    /**
+     * The X-FRAME-OPTIONS header in HTTP response to mitigate clickjacking
+     * attack.
+     */
   public enum XFrameOption {
-    DENY("DENY") , SAMEORIGIN ("SAMEORIGIN"), ALLOWFROM ("ALLOW-FROM");
+    DENY("DENY"), SAMEORIGIN("SAMEORIGIN"), ALLOWFROM("ALLOW-FROM");
 
     XFrameOption(String name) {
       this.name = name;
@@ -1666,5 +1664,31 @@ public final class HttpServer2 implements FilterContainer {
       }
       throw new IllegalArgumentException("Unexpected value in xFrameOption.");
     }
+  }
+
+
+  private Map<String, String> setHeaders(Configuration conf) {
+    Map<String, String> xFrameParams = new HashMap<>();
+    Map<String, String> headerConfigMap =
+            conf.getValByRegex(HTTP_HEADER_REGEX);
+
+    xFrameParams.putAll(getDefaultHeaders());
+    if(this.xFrameOptionIsEnabled) {
+      xFrameParams.put(HTTP_HEADER_PREFIX+X_FRAME_OPTIONS,
+              this.xFrameOption.toString());
+    }
+    xFrameParams.putAll(headerConfigMap);
+    return xFrameParams;
+  }
+
+  private Map<String, String> getDefaultHeaders() {
+    Map<String, String> headers = new HashMap<>();
+    String[] splitVal = X_CONTENT_TYPE_OPTIONS.split(":");
+    headers.put(HTTP_HEADER_PREFIX + splitVal[0],
+            splitVal[1]);
+    splitVal = X_XSS_PROTECTION.split(":");
+    headers.put(HTTP_HEADER_PREFIX + splitVal[0],
+            splitVal[1]);
+    return headers;
   }
 }

@@ -37,6 +37,8 @@ import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
@@ -54,8 +56,6 @@ import java.util.concurrent.TimeUnit;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectReader;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.input.BoundedInputStream;
 import org.apache.hadoop.conf.Configuration;
@@ -94,8 +94,11 @@ import org.apache.hadoop.hdfs.HdfsKMSUtil;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
+import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.FileEncryptionInfoProto;
 import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
@@ -109,7 +112,6 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.AccessControlException;
-import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
@@ -117,6 +119,8 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.token.TokenSelector;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
+import org.apache.hadoop.security.token.DelegationTokenIssuer;
+import org.apache.hadoop.util.JsonSerialization;
 import org.apache.hadoop.util.KMSUtil;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.StringUtils;
@@ -142,6 +146,8 @@ public class WebHdfsFileSystem extends FileSystem
   public static final String EZ_HEADER = "X-Hadoop-Accept-EZ";
   public static final String FEFINFO_HEADER = "X-Hadoop-feInfo";
 
+  public static final String SPECIAL_FILENAME_CHARACTERS_REGEX = ".*[;+%].*";
+
   /**
    * Default connection factory may be overridden in tests to use smaller
    * timeout values
@@ -164,16 +170,15 @@ public class WebHdfsFileSystem extends FileSystem
   private InetSocketAddress nnAddrs[];
   private int currentNNAddrIndex;
   private boolean disallowFallbackToInsecureCluster;
+  private boolean isInsecureCluster;
   private String restCsrfCustomHeader;
   private Set<String> restCsrfMethodsToIgnore;
-  private static final ObjectReader READER =
-      new ObjectMapper().readerFor(Map.class);
 
   private DFSOpsCountStatistics storageStatistics;
+  private KeyProvider testProvider;
 
   /**
    * Return the protocol scheme for the FileSystem.
-   * <p/>
    *
    * @return <code>webhdfs</code>
    */
@@ -278,6 +283,7 @@ public class WebHdfsFileSystem extends FileSystem
 
     this.workingDir = makeQualified(new Path(getHomeDirectoryString(ugi)));
     this.canRefreshDelegationToken = UserGroupInformation.isSecurityEnabled();
+    this.isInsecureCluster = !this.canRefreshDelegationToken;
     this.disallowFallbackToInsecureCluster = !conf.getBoolean(
         CommonConfigurationKeys.IPC_CLIENT_FALLBACK_TO_SIMPLE_AUTH_ALLOWED_KEY,
         CommonConfigurationKeys.IPC_CLIENT_FALLBACK_TO_SIMPLE_AUTH_ALLOWED_DEFAULT);
@@ -363,6 +369,7 @@ public class WebHdfsFileSystem extends FileSystem
             LOG.debug("Fetched new token: {}", token);
           } else { // security is disabled
             canRefreshDelegationToken = false;
+            isInsecureCluster = true;
           }
         }
       }
@@ -409,8 +416,7 @@ public class WebHdfsFileSystem extends FileSystem
     if (cachedHomeDirectory == null) {
       final HttpOpParam.Op op = GetOpParam.Op.GETHOMEDIRECTORY;
       try {
-        String pathFromDelegatedFS = new FsPathResponseRunner<String>(op, null,
-            new UserParam(ugi)) {
+        String pathFromDelegatedFS = new FsPathResponseRunner<String>(op, null){
           @Override
           String decodeResponse(Map<?, ?> json) throws IOException {
             return JsonUtilClient.getPath(json);
@@ -470,7 +476,7 @@ public class WebHdfsFileSystem extends FileSystem
               + "\" (parsed=\"" + parsed + "\")");
         }
       }
-      return READER.readValue(in);
+      return JsonSerialization.mapReader().readValue(in);
     } finally {
       in.close();
     }
@@ -572,7 +578,8 @@ public class WebHdfsFileSystem extends FileSystem
     return url;
   }
 
-  Param<?,?>[] getAuthParameters(final HttpOpParam.Op op) throws IOException {
+  private synchronized Param<?, ?>[] getAuthParameters(final HttpOpParam.Op op)
+      throws IOException {
     List<Param<?,?>> authParams = Lists.newArrayList();
     // Skip adding delegation token for token operations because these
     // operations require authentication.
@@ -589,7 +596,12 @@ public class WebHdfsFileSystem extends FileSystem
         authParams.add(new DoAsParam(userUgi.getShortUserName()));
         userUgi = realUgi;
       }
-      authParams.add(new UserParam(userUgi.getShortUserName()));
+      UserParam userParam = new UserParam((userUgi.getShortUserName()));
+
+      //in insecure, use user.name parameter, in secure, use spnego auth
+      if(isInsecureCluster) {
+        authParams.add(userParam);
+      }
     }
     return authParams.toArray(new Param<?,?>[0]);
   }
@@ -597,8 +609,45 @@ public class WebHdfsFileSystem extends FileSystem
   URL toUrl(final HttpOpParam.Op op, final Path fspath,
       final Param<?,?>... parameters) throws IOException {
     //initialize URI path and query
+
+    Path encodedFSPath = fspath;
+    if (fspath != null) {
+      URI fspathUri = fspath.toUri();
+      String fspathUriDecoded = fspathUri.getPath();
+      boolean pathAlreadyEncoded = false;
+      try {
+        fspathUriDecoded = URLDecoder.decode(fspathUri.getPath(), "UTF-8");
+        //below condition check added as part of fixing HDFS-14323 to make
+        //sure pathAlreadyEncoded is not set in the case the input url does
+        //not have any encoded sequence already.This will help pulling data
+        //from 2.x hadoop cluster to 3.x using 3.x distcp client operation
+        if(!fspathUri.getPath().equals(fspathUriDecoded)) {
+          pathAlreadyEncoded = true;
+        }
+      } catch (IllegalArgumentException ex) {
+        LOG.trace("Cannot decode URL encoded file", ex);
+      }
+      String[] fspathItems = fspathUriDecoded.split("/");
+
+      if (fspathItems.length > 0) {
+        StringBuilder fsPathEncodedItems = new StringBuilder();
+        for (String fsPathItem : fspathItems) {
+          fsPathEncodedItems.append("/");
+          if (fsPathItem.matches(SPECIAL_FILENAME_CHARACTERS_REGEX) ||
+              pathAlreadyEncoded) {
+            fsPathEncodedItems.append(URLEncoder.encode(fsPathItem, "UTF-8"));
+          } else {
+            fsPathEncodedItems.append(fsPathItem);
+          }
+        }
+        encodedFSPath = new Path(fspathUri.getScheme(),
+                fspathUri.getAuthority(), fsPathEncodedItems.substring(1));
+      }
+    }
+
     final String path = PATH_PREFIX
-        + (fspath == null? "/": makeQualified(fspath).toUri().getRawPath());
+        + (encodedFSPath == null ? "/" :
+            makeQualified(encodedFSPath).toUri().getRawPath());
     final String query = op.toQueryString()
         + Param.toSortedString("&", getAuthParameters(op))
         + Param.toSortedString("&", parameters);
@@ -1277,6 +1326,54 @@ public class WebHdfsFileSystem extends FileSystem
   }
 
   @Override
+  public void satisfyStoragePolicy(final Path p) throws IOException {
+    final HttpOpParam.Op op = PutOpParam.Op.SATISFYSTORAGEPOLICY;
+    new FsPathRunner(op, p).run();
+  }
+
+  public void enableECPolicy(String policyName) throws IOException {
+    statistics.incrementWriteOps(1);
+    storageStatistics.incrementOpCounter(OpType.ENABLE_EC_POLICY);
+    final HttpOpParam.Op op = PutOpParam.Op.ENABLEECPOLICY;
+    new FsPathRunner(op, null, new ECPolicyParam(policyName)).run();
+  }
+
+  public void disableECPolicy(String policyName) throws IOException {
+    statistics.incrementWriteOps(1);
+    storageStatistics.incrementOpCounter(OpType.DISABLE_EC_POLICY);
+    final HttpOpParam.Op op = PutOpParam.Op.DISABLEECPOLICY;
+    new FsPathRunner(op, null, new ECPolicyParam(policyName)).run();
+  }
+
+  public void setErasureCodingPolicy(Path p, String policyName)
+      throws IOException {
+    statistics.incrementWriteOps(1);
+    storageStatistics.incrementOpCounter(OpType.SET_EC_POLICY);
+    final HttpOpParam.Op op = PutOpParam.Op.SETECPOLICY;
+    new FsPathRunner(op, p, new ECPolicyParam(policyName)).run();
+  }
+
+  public void unsetErasureCodingPolicy(Path p) throws IOException {
+    statistics.incrementWriteOps(1);
+    storageStatistics.incrementOpCounter(OpType.UNSET_EC_POLICY);
+    final HttpOpParam.Op op = PostOpParam.Op.UNSETECPOLICY;
+    new FsPathRunner(op, p).run();
+  }
+
+  public ErasureCodingPolicy getErasureCodingPolicy(Path p)
+      throws IOException {
+    statistics.incrementReadOps(1);
+    storageStatistics.incrementOpCounter(OpType.GET_EC_POLICY);
+    final HttpOpParam.Op op =GetOpParam.Op.GETECPOLICY;
+    return new FsPathResponseRunner<ErasureCodingPolicy>(op, p) {
+      @Override
+      ErasureCodingPolicy decodeResponse(Map<?, ?> json) throws IOException {
+        return JsonUtilClient.toECPolicy((Map<?, ?>) json);
+      }
+    }.run();
+  }
+
+  @Override
   public Path createSnapshot(final Path path, final String snapshotName)
       throws IOException {
     statistics.incrementWriteOps(1);
@@ -1315,6 +1412,33 @@ public class WebHdfsFileSystem extends FileSystem
     final HttpOpParam.Op op = PutOpParam.Op.RENAMESNAPSHOT;
     new FsPathRunner(op, path, new OldSnapshotNameParam(snapshotOldName),
         new SnapshotNameParam(snapshotNewName)).run();
+  }
+
+  public SnapshotDiffReport getSnapshotDiffReport(final Path snapshotDir,
+      final String fromSnapshot, final String toSnapshot) throws IOException {
+    storageStatistics.incrementOpCounter(OpType.GET_SNAPSHOT_DIFF);
+    final HttpOpParam.Op op = GetOpParam.Op.GETSNAPSHOTDIFF;
+    return new FsPathResponseRunner<SnapshotDiffReport>(op, snapshotDir,
+        new OldSnapshotNameParam(fromSnapshot),
+        new SnapshotNameParam(toSnapshot)) {
+      @Override
+      SnapshotDiffReport decodeResponse(Map<?, ?> json) {
+        return JsonUtilClient.toSnapshotDiffReport(json);
+      }
+    }.run();
+  }
+
+  public SnapshottableDirectoryStatus[] getSnapshottableDirectoryList()
+      throws IOException {
+    storageStatistics
+        .incrementOpCounter(OpType.GET_SNAPSHOTTABLE_DIRECTORY_LIST);
+    final HttpOpParam.Op op = GetOpParam.Op.GETSNAPSHOTTABLEDIRECTORYLIST;
+    return new FsPathResponseRunner<SnapshottableDirectoryStatus[]>(op, null) {
+      @Override
+      SnapshottableDirectoryStatus[] decodeResponse(Map<?, ?> json) {
+        return JsonUtilClient.toSnapshottableDirectoryList(json);
+      }
+    }.run();
   }
 
   @Override
@@ -1456,6 +1580,9 @@ public class WebHdfsFileSystem extends FileSystem
     } catch (IOException ioe) {
       LOG.debug("Token cancel failed: ", ioe);
     } finally {
+      if (connectionFactory != null) {
+        connectionFactory.destroy();
+      }
       super.close();
     }
   }
@@ -1631,6 +1758,16 @@ public class WebHdfsFileSystem extends FileSystem
   }
 
   @Override
+  public DelegationTokenIssuer[] getAdditionalTokenIssuers()
+      throws IOException {
+    KeyProvider keyProvider = getKeyProvider();
+    if (keyProvider instanceof DelegationTokenIssuer) {
+      return new DelegationTokenIssuer[] {(DelegationTokenIssuer) keyProvider};
+    }
+    return null;
+  }
+
+  @Override
   public synchronized Token<?> getRenewToken() {
     return delegationToken;
   }
@@ -1663,14 +1800,6 @@ public class WebHdfsFileSystem extends FileSystem
     new FsPathRunner(op, null,
         new TokenArgumentParam(token.encodeToUrlString())
     ).run();
-  }
-
-  @Override
-  public Token<?>[] addDelegationTokens(String renewer,
-      Credentials credentials) throws IOException {
-    Token<?>[] tokens = super.addDelegationTokens(renewer, credentials);
-    return HdfsKMSUtil.addDelegationTokensForKeyProvider(this, renewer,
-        credentials, getUri(), tokens);
   }
 
   public BlockLocation[] getFileBlockLocations(final FileStatus status,
@@ -1887,11 +2016,19 @@ public class WebHdfsFileSystem extends FileSystem
 
   @Override
   public KeyProvider getKeyProvider() throws IOException {
+    if (testProvider != null) {
+      return testProvider;
+    }
     URI keyProviderUri = getKeyProviderUri();
     if (keyProviderUri == null) {
       return null;
     }
     return KMSUtil.createKeyProviderFromUri(getConf(), keyProviderUri);
+  }
+
+  @VisibleForTesting
+  public void setTestProvider(KeyProvider kp) {
+    testProvider = kp;
   }
 
   /**

@@ -17,11 +17,13 @@
  */
 package org.apache.hadoop.hdfs.server.namenode.ha;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HA_NN_NOT_BECOME_ACTIVE_IN_SAFEMODE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -30,8 +32,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.ha.ServiceFailedException;
+import org.apache.hadoop.test.LambdaTestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -62,11 +66,11 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.log4j.Level;
+import org.apache.hadoop.test.Whitebox;
+import org.slf4j.event.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
@@ -75,7 +79,8 @@ import com.google.common.collect.Lists;
  * Tests that exercise safemode in an HA cluster.
  */
 public class TestHASafeMode {
-  private static final Log LOG = LogFactory.getLog(TestHASafeMode.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestHASafeMode.class);
   private static final int BLOCK_SIZE = 1024;
   private NameNode nn0;
   private NameNode nn1;
@@ -83,8 +88,8 @@ public class TestHASafeMode {
   private MiniDFSCluster cluster;
   
   static {
-    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
-    GenericTestUtils.setLogLevel(FSImage.LOG, Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(org.apache.log4j.Level.TRACE);
+    GenericTestUtils.setLogLevel(FSImage.LOG, Level.TRACE);
   }
   
   @Before
@@ -885,5 +890,32 @@ public class TestHASafeMode {
     banner(nn1.getNamesystem().getSafemode());
     cluster.transitionToActive(1);
     assertSafeMode(nn1, 3, 3, 3, 0);
+  }
+
+  /**
+   * Test transition to active when namenode in safemode.
+   *
+   * @throws IOException
+   */
+  @Test
+  public void testTransitionToActiveWhenSafeMode() throws Exception {
+    Configuration config = new Configuration();
+    config.setBoolean(DFS_HA_NN_NOT_BECOME_ACTIVE_IN_SAFEMODE, true);
+    try (MiniDFSCluster miniCluster = new MiniDFSCluster.Builder(config,
+        new File(GenericTestUtils.getRandomizedTempPath()))
+        .nnTopology(MiniDFSNNTopology.simpleHATopology())
+        .numDataNodes(1)
+        .build()) {
+      miniCluster.waitActive();
+      miniCluster.transitionToStandby(0);
+      miniCluster.transitionToStandby(1);
+      NameNode namenode0 = miniCluster.getNameNode(0);
+      NameNode namenode1 = miniCluster.getNameNode(1);
+      NameNodeAdapter.enterSafeMode(namenode0, false);
+      NameNodeAdapter.enterSafeMode(namenode1, false);
+      LambdaTestUtils.intercept(ServiceFailedException.class,
+          "NameNode still not leave safemode",
+          () -> miniCluster.transitionToActive(0));
+    }
   }
 }

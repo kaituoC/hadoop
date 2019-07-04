@@ -20,11 +20,13 @@ package org.apache.hadoop.hdfs.server.datanode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.protobuf.ByteString;
+import javax.crypto.SecretKey;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.ExtendedBlockId;
 import org.apache.hadoop.hdfs.net.Peer;
+import org.apache.hadoop.hdfs.protocol.BlockChecksumOptions;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
@@ -46,6 +48,7 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReleaseShortCirc
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
+import org.apache.hadoop.hdfs.security.token.block.BlockKey;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.server.datanode.BlockChecksumHelper.BlockChecksumComputer;
 import org.apache.hadoop.hdfs.server.datanode.BlockChecksumHelper.AbstractBlockChecksumComputer;
@@ -312,7 +315,8 @@ class DataXceiver extends Receiver implements Runnable {
         } else {
           LOG.info("{}; {}", s1, t.toString());
         }
-      } else if (t instanceof InvalidToken) {
+      } else if (t instanceof InvalidToken ||
+          t.getCause() instanceof InvalidToken) {
         // The InvalidToken exception has already been logged in
         // checkAccess() method and this is not a server error.
         LOG.trace(s, t);
@@ -796,8 +800,16 @@ class DataXceiver extends Receiver implements Runnable {
           InputStream unbufMirrorIn = NetUtils.getInputStream(mirrorSock);
           DataEncryptionKeyFactory keyFactory =
             datanode.getDataEncryptionKeyFactoryForBlock(block);
-          IOStreamPair saslStreams = datanode.saslClient.socketSend(mirrorSock,
-            unbufMirrorOut, unbufMirrorIn, keyFactory, blockToken, targets[0]);
+          SecretKey secretKey = null;
+          if (dnConf.overwriteDownstreamDerivedQOP) {
+            String bpid = block.getBlockPoolId();
+            BlockKey blockKey = datanode.blockPoolTokenSecretManager
+                .get(bpid).getCurrentKey();
+            secretKey = blockKey.getKey();
+          }
+          IOStreamPair saslStreams = datanode.saslClient.socketSend(
+              mirrorSock, unbufMirrorOut, unbufMirrorIn, keyFactory,
+              blockToken, targets[0], secretKey);
           unbufMirrorOut = saslStreams.out;
           unbufMirrorIn = saslStreams.in;
           mirrorOut = new DataOutputStream(new BufferedOutputStream(unbufMirrorOut,
@@ -968,15 +980,16 @@ class DataXceiver extends Receiver implements Runnable {
 
   @Override
   public void blockChecksum(ExtendedBlock block,
-                            Token<BlockTokenIdentifier> blockToken)
+      Token<BlockTokenIdentifier> blockToken,
+      BlockChecksumOptions blockChecksumOptions)
       throws IOException {
     updateCurrentThreadName("Getting checksum for block " + block);
     final DataOutputStream out = new DataOutputStream(
         getOutputStream());
     checkAccess(out, true, block, blockToken, Op.BLOCK_CHECKSUM,
         BlockTokenIdentifier.AccessMode.READ);
-    BlockChecksumComputer maker =
-        new ReplicatedBlockChecksumComputer(datanode, block);
+    BlockChecksumComputer maker = new ReplicatedBlockChecksumComputer(
+        datanode, block, blockChecksumOptions);
 
     try {
       maker.compute();
@@ -987,8 +1000,10 @@ class DataXceiver extends Receiver implements Runnable {
           .setChecksumResponse(OpBlockChecksumResponseProto.newBuilder()
               .setBytesPerCrc(maker.getBytesPerCRC())
               .setCrcPerBlock(maker.getCrcPerBlock())
-              .setMd5(ByteString.copyFrom(maker.getOutBytes()))
-              .setCrcType(PBHelperClient.convert(maker.getCrcType())))
+              .setBlockChecksum(ByteString.copyFrom(maker.getOutBytes()))
+              .setCrcType(PBHelperClient.convert(maker.getCrcType()))
+              .setBlockChecksumOptions(
+                  PBHelperClient.convert(blockChecksumOptions)))
           .build()
           .writeDelimitedTo(out);
       out.flush();
@@ -1007,7 +1022,9 @@ class DataXceiver extends Receiver implements Runnable {
 
   @Override
   public void blockGroupChecksum(final StripedBlockInfo stripedBlockInfo,
-      final Token<BlockTokenIdentifier> blockToken, long requestedNumBytes)
+      final Token<BlockTokenIdentifier> blockToken,
+      long requestedNumBytes,
+      BlockChecksumOptions blockChecksumOptions)
       throws IOException {
     final ExtendedBlock block = stripedBlockInfo.getBlock();
     updateCurrentThreadName("Getting checksum for block group" +
@@ -1018,7 +1035,7 @@ class DataXceiver extends Receiver implements Runnable {
 
     AbstractBlockChecksumComputer maker =
         new BlockGroupNonStripedChecksumComputer(datanode, stripedBlockInfo,
-            requestedNumBytes);
+            requestedNumBytes, blockChecksumOptions);
 
     try {
       maker.compute();
@@ -1029,8 +1046,10 @@ class DataXceiver extends Receiver implements Runnable {
           .setChecksumResponse(OpBlockChecksumResponseProto.newBuilder()
               .setBytesPerCrc(maker.getBytesPerCRC())
               .setCrcPerBlock(maker.getCrcPerBlock())
-              .setMd5(ByteString.copyFrom(maker.getOutBytes()))
-              .setCrcType(PBHelperClient.convert(maker.getCrcType())))
+              .setBlockChecksum(ByteString.copyFrom(maker.getOutBytes()))
+              .setCrcType(PBHelperClient.convert(maker.getCrcType()))
+              .setBlockChecksumOptions(
+                  PBHelperClient.convert(blockChecksumOptions)))
           .build()
           .writeDelimitedTo(out);
       out.flush();

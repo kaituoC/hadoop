@@ -57,7 +57,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
  * Manages decommissioning and maintenance state for DataNodes. A background
  * monitor thread periodically checks the status of DataNodes that are
  * decommissioning or entering maintenance state.
- * <p/>
+ * <p>
  * A DataNode can be decommissioned in a few situations:
  * <ul>
  * <li>If a DN is dead, it is decommissioned immediately.</li>
@@ -72,11 +72,11 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
  * determine if they can be DECOMMISSIONED. The monitor also prunes this list
  * as blocks become replicated, so monitor scans will become more efficient
  * over time.
- * <p/>
+ * <p>
  * DECOMMISSION_INPROGRESS nodes that become dead do not progress to
  * DECOMMISSIONED until they become live again. This prevents potential
  * durability loss for singly-replicated blocks (see HDFS-6791).
- * <p/>
+ * <p>
  * DataNodes can also be put under maintenance state for any short duration
  * maintenance operations. Unlike decommissioning, blocks are not always
  * re-replicated for the DataNodes to enter maintenance state. When the
@@ -88,7 +88,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
  * of maintenance expiry time. When DataNodes don't transition or join the
  * cluster back by expiry time, blocks are re-replicated just as in
  * decommissioning case as to avoid read or write performance degradation.
- * <p/>
+ * <p>
  * This class depends on the FSNamesystem lock for synchronization.
  */
 @InterfaceAudience.Private
@@ -345,7 +345,9 @@ public class DatanodeAdminManager {
    * @return true if sufficient, else false.
    */
   private boolean isSufficient(BlockInfo block, BlockCollection bc,
-      NumberReplicas numberReplicas, boolean isDecommission) {
+                               NumberReplicas numberReplicas,
+                               boolean isDecommission,
+                               boolean isMaintenance) {
     if (blockManager.hasEnoughEffectiveReplicas(block, numberReplicas, 0)) {
       // Block has enough replica, skip
       LOG.trace("Block {} does not need replication.", block);
@@ -379,6 +381,10 @@ public class DatanodeAdminManager {
         }
       }
     }
+    if (isMaintenance
+      && numLive >= blockManager.getMinReplicationToBeInMaintenance()) {
+      return true;
+    }
     return false;
   }
 
@@ -395,8 +401,7 @@ public class DatanodeAdminManager {
     StringBuilder nodeList = new StringBuilder();
     for (DatanodeStorageInfo storage : storages) {
       final DatanodeDescriptor node = storage.getDatanodeDescriptor();
-      nodeList.append(node);
-      nodeList.append(' ');
+      nodeList.append(node).append(' ');
     }
     NameNode.blockStateChangeLog.info(
         "Block: " + block + ", Expected Replicas: "
@@ -706,6 +711,7 @@ public class DatanodeAdminManager {
         // Schedule low redundancy blocks for reconstruction
         // if not already pending.
         boolean isDecommission = datanode.isDecommissionInProgress();
+        boolean isMaintenance = datanode.isEnteringMaintenance();
         boolean neededReconstruction = isDecommission ?
             blockManager.isNeededReconstruction(block, num) :
             blockManager.isNeededReconstructionForMaintenance(block, num);
@@ -724,7 +730,7 @@ public class DatanodeAdminManager {
         // Even if the block is without sufficient redundancy,
         // it might not block decommission/maintenance if it
         // has sufficient redundancy.
-        if (isSufficient(block, bc, num, isDecommission)) {
+        if (isSufficient(block, bc, num, isDecommission, isMaintenance)) {
           if (pruneReliableBlocks) {
             it.remove();
           }

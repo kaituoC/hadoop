@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.yarn.sls.synthetic;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.commons.math3.distribution.AbstractRealDistribution;
 import org.apache.commons.math3.random.JDKRandomGenerator;
 import org.apache.hadoop.conf.Configuration;
@@ -27,6 +27,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.tools.rumen.JobStory;
 import org.apache.hadoop.tools.rumen.JobStoryProducer;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.sls.appmaster.MRAMSimulator;
 import org.codehaus.jackson.annotate.JsonCreator;
@@ -52,7 +53,7 @@ import static org.codehaus.jackson.map.DeserializationConfig.Feature.FAIL_ON_UNK
 public class SynthTraceJobProducer implements JobStoryProducer {
 
   @SuppressWarnings("StaticVariableName")
-  private static final Log LOG = LogFactory.getLog(SynthTraceJobProducer.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SynthTraceJobProducer.class);
 
   private final Configuration conf;
   private final AtomicInteger numJobs;
@@ -199,6 +200,7 @@ public class SynthTraceJobProducer implements JobStoryProducer {
         map.max_vcores = new Sample((double) jobDef.map_max_vcores_avg,
             jobDef.map_max_vcores_stddev);
         map.priority = DEFAULT_MAPPER_PRIORITY;
+        map.executionType = jobDef.map_execution_type;
 
         jobDef.tasks.add(map);
         TaskDefinition reduce = new TaskDefinition();
@@ -210,6 +212,7 @@ public class SynthTraceJobProducer implements JobStoryProducer {
         reduce.max_vcores = new Sample((double) jobDef.reduce_max_vcores_avg,
             jobDef.reduce_max_vcores_stddev);
         reduce.priority = DEFAULT_REDUCER_PRIORITY;
+        reduce.executionType = jobDef.reduce_execution_type;
 
         jobDef.tasks.add(reduce);
       } catch (JsonMappingException e) {
@@ -425,6 +428,12 @@ public class SynthTraceJobProducer implements JobStoryProducer {
     @JsonProperty("reduce_max_vcores_stddev")
     double reduce_max_vcores_stddev;
 
+    //container execution type
+    @JsonProperty("map_execution_type")
+    String map_execution_type = ExecutionType.GUARANTEED.name();
+    @JsonProperty("reduce_execution_type")
+    String reduce_execution_type = ExecutionType.GUARANTEED.name();
+
     public void init(JDKRandomGenerator rand){
       deadline_factor.init(rand);
       duration.init(rand);
@@ -464,12 +473,15 @@ public class SynthTraceJobProducer implements JobStoryProducer {
     Sample max_vcores;
     @JsonProperty("priority")
     int priority;
+    @JsonProperty("execution_type")
+    String executionType = ExecutionType.GUARANTEED.name();
 
     @Override
     public String toString(){
       return "\nTaskDefinition " + type
           + " Count[" + count + "] Time[" + time + "] Memory[" + max_memory
-          + "] Vcores[" + max_vcores + "] Priority[" + priority + "]";
+          + "] Vcores[" + max_vcores + "] Priority[" + priority
+          + "] ExecutionType[" + executionType + "]";
     }
   }
 

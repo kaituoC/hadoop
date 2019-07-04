@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
-import org.apache.commons.lang.text.StrBuilder;
+import org.apache.commons.text.TextStringBuilder;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -204,15 +204,15 @@ public class TestDecommission extends AdminStatesBaseTest {
 
     writeFile(fileSys, file1, replicas);
 
-    int deadDecomissioned = ns.getNumDecomDeadDataNodes();
-    int liveDecomissioned = ns.getNumDecomLiveDataNodes();
+    int deadDecommissioned = ns.getNumDecomDeadDataNodes();
+    int liveDecommissioned = ns.getNumDecomLiveDataNodes();
 
     // Decommission one node. Verify that node is decommissioned.
     DatanodeInfo decomNode = takeNodeOutofService(0, null, 0,
         decommissionedNodes, AdminStates.DECOMMISSIONED);
     decommissionedNodes.add(decomNode);
-    assertEquals(deadDecomissioned, ns.getNumDecomDeadDataNodes());
-    assertEquals(liveDecomissioned + 1, ns.getNumDecomLiveDataNodes());
+    assertEquals(deadDecommissioned, ns.getNumDecomDeadDataNodes());
+    assertEquals(liveDecommissioned + 1, ns.getNumDecomLiveDataNodes());
 
     // Ensure decommissioned datanode is not automatically shutdown
     DFSClient client = getDfsClient(0);
@@ -378,15 +378,15 @@ public class TestDecommission extends AdminStatesBaseTest {
 
         writeFile(fileSys, file1, replicas);
 
-        int deadDecomissioned = ns.getNumDecomDeadDataNodes();
-        int liveDecomissioned = ns.getNumDecomLiveDataNodes();
+        int deadDecommissioned = ns.getNumDecomDeadDataNodes();
+        int liveDecommissioned = ns.getNumDecomLiveDataNodes();
 
         // Decommission one node. Verify that node is decommissioned.
         DatanodeInfo decomNode = takeNodeOutofService(i, null, 0,
             decommissionedNodes, AdminStates.DECOMMISSIONED);
         decommissionedNodes.add(decomNode);
-        assertEquals(deadDecomissioned, ns.getNumDecomDeadDataNodes());
-        assertEquals(liveDecomissioned + 1, ns.getNumDecomLiveDataNodes());
+        assertEquals(deadDecommissioned, ns.getNumDecomDeadDataNodes());
+        assertEquals(liveDecommissioned + 1, ns.getNumDecomLiveDataNodes());
 
         // Ensure decommissioned datanode is not automatically shutdown
         DFSClient client = getDfsClient(i);
@@ -661,7 +661,7 @@ public class TestDecommission extends AdminStatesBaseTest {
   }
 
   private static String scanIntoString(final ByteArrayOutputStream baos) {
-    final StrBuilder sb = new StrBuilder();
+    final TextStringBuilder sb = new TextStringBuilder();
     final Scanner scanner = new Scanner(baos.toString());
     while (scanner.hasNextLine()) {
       sb.appendln(scanner.nextLine());

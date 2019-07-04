@@ -49,7 +49,7 @@ public class ZStandardCompressor implements Compressor {
   private int uncompressedDirectBufOff = 0, uncompressedDirectBufLen = 0;
   private boolean keepUncompressedBuf = false;
   private ByteBuffer compressedDirectBuf = null;
-  private boolean finish, finished;
+  private boolean finished;
   private long bytesRead = 0;
   private long bytesWritten = 0;
 
@@ -180,7 +180,6 @@ public class ZStandardCompressor implements Compressor {
 
   @Override
   public void finish() {
-    finish = true;
   }
 
   @Override
@@ -266,7 +265,6 @@ public class ZStandardCompressor implements Compressor {
   public void reset() {
     checkStream();
     init(level, stream);
-    finish = false;
     finished = false;
     bytesRead = 0;
     bytesWritten = 0;
@@ -298,7 +296,7 @@ public class ZStandardCompressor implements Compressor {
   private native static void init(int level, long stream);
   private native int deflateBytesDirect(ByteBuffer src, int srcOffset,
       int srcLen, ByteBuffer dst, int dstLen);
-  private static native int getStreamSize();
+  private native static int getStreamSize();
   private native static void end(long strm);
   private native static void initIDs();
   public native static String getLibraryName();

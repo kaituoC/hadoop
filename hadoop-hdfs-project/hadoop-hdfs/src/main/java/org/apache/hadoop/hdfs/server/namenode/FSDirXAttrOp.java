@@ -42,6 +42,7 @@ import java.util.ListIterator;
 
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.CRYPTO_XATTR_ENCRYPTION_ZONE;
 import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.SECURITY_XATTR_UNREADABLE_BY_SUPERUSER;
+import static org.apache.hadoop.hdfs.server.common.HdfsServerConstants.XATTR_SATISFY_STORAGE_POLICY;
 
 class FSDirXAttrOp {
   private static final XAttr KEYID_XATTR =
@@ -294,6 +295,12 @@ class FSDirXAttrOp {
         }
       }
 
+      // Add inode id to movement queue if xattrs contain satisfy xattr.
+      if (XATTR_SATISFY_STORAGE_POLICY.equals(xaName)) {
+        FSDirSatisfyStoragePolicyOp.unprotectedSatisfyStoragePolicy(inode, fsd);
+        continue;
+      }
+
       if (!isFile && SECURITY_XATTR_UNREADABLE_BY_SUPERUSER.equals(xaName)) {
         throw new IOException("Can only set '" +
             SECURITY_XATTR_UNREADABLE_BY_SUPERUSER + "' on a file.");
@@ -378,16 +385,18 @@ class FSDirXAttrOp {
       String prefixedName) throws IOException {
     fsd.readLock();
     try {
-      return XAttrStorage.readINodeXAttrByPrefixedName(iip, prefixedName);
+      return XAttrStorage.readINodeXAttrByPrefixedName(iip.getLastINode(),
+          iip.getPathSnapshotId(), prefixedName);
     } finally {
       fsd.readUnlock();
     }
   }
 
   static XAttr unprotectedGetXAttrByPrefixedName(
-      INodesInPath iip, String prefixedName)
+      INode inode, int snapshotId, String prefixedName)
       throws IOException {
-    return XAttrStorage.readINodeXAttrByPrefixedName(iip, prefixedName);
+    return XAttrStorage.readINodeXAttrByPrefixedName(
+        inode, snapshotId, prefixedName);
   }
 
   private static void checkXAttrChangeAccess(

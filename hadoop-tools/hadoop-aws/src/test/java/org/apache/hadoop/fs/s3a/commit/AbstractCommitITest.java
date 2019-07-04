@@ -18,8 +18,10 @@
 
 package org.apache.hadoop.fs.s3a.commit;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -28,12 +30,14 @@ import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.contract.ContractTestUtils;
 import org.apache.hadoop.fs.s3a.AbstractS3ATestBase;
+import org.apache.hadoop.fs.s3a.FailureInjectionPolicy;
 import org.apache.hadoop.fs.s3a.InconsistentAmazonS3Client;
 import org.apache.hadoop.fs.s3a.S3AFileSystem;
 import org.apache.hadoop.fs.s3a.WriteOperationHelper;
@@ -49,6 +53,7 @@ import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
 import static org.apache.hadoop.fs.s3a.Constants.*;
 import static org.apache.hadoop.fs.s3a.MultipartTestUtils.listMultipartUploads;
 import static org.apache.hadoop.fs.s3a.S3ATestUtils.*;
+import static org.apache.hadoop.fs.s3a.S3AUtils.applyLocatedFiles;
 import static org.apache.hadoop.fs.s3a.commit.CommitConstants.*;
 
 /**
@@ -74,6 +79,7 @@ public abstract class AbstractCommitITest extends AbstractS3ATestBase {
 
   private InconsistentAmazonS3Client inconsistentClient;
 
+
   /**
    * Should the inconsistent S3A client be used?
    * Default value: true.
@@ -90,7 +96,7 @@ public abstract class AbstractCommitITest extends AbstractS3ATestBase {
   @Override
   protected Path path(String filepath) throws IOException {
     return useInconsistentClient() ?
-           super.path(InconsistentAmazonS3Client.DEFAULT_DELAY_KEY_SUBSTRING
+           super.path(FailureInjectionPolicy.DEFAULT_DELAY_KEY_SUBSTRING
                + "/" + filepath)
            : super.path(filepath);
   }
@@ -173,6 +179,25 @@ public abstract class AbstractCommitITest extends AbstractS3ATestBase {
   }
 
   /**
+   * Create a random Job ID using the fork ID as part of the number.
+   * @return fork ID string in a format parseable by Jobs
+   * @throws Exception failure
+   */
+  public static String randomJobId() throws Exception {
+    String testUniqueForkId = System.getProperty(TEST_UNIQUE_FORK_ID, "0001");
+    int l = testUniqueForkId.length();
+    String trailingDigits = testUniqueForkId.substring(l - 4, l);
+    try {
+      int digitValue = Integer.valueOf(trailingDigits);
+      return String.format("20070712%04d_%04d",
+          (long)(Math.random() * 1000),
+          digitValue);
+    } catch (NumberFormatException e) {
+      throw new Exception("Failed to parse " + trailingDigits, e);
+    }
+  }
+
+  /**
    * Teardown waits for the consistency delay and resets failure count, so
    * FS is stable, before the superclass teardown is called. This
    * should clean things up better.
@@ -180,6 +205,7 @@ public abstract class AbstractCommitITest extends AbstractS3ATestBase {
    */
   @Override
   public void teardown() throws Exception {
+    LOG.info("AbstractCommitITest::teardown");
     waitForConsistency();
     // make sure there are no failures any more
     resetFailures();
@@ -415,5 +441,65 @@ public abstract class AbstractCommitITest extends AbstractS3ATestBase {
     return new TaskAttemptContextImpl(
         jContext.getConfiguration(),
         TypeConverter.fromYarn(attemptID));
+  }
+
+
+  /**
+   * Load in the success data marker: this guarantees that an S3A
+   * committer was used.
+   * @param fs filesystem
+   * @param outputPath path of job
+   * @param committerName name of committer to match
+   * @return the success data
+   * @throws IOException IO failure
+   */
+  public static SuccessData validateSuccessFile(final S3AFileSystem fs,
+      final Path outputPath, final String committerName) throws IOException {
+    SuccessData successData = null;
+    try {
+      successData = loadSuccessFile(fs, outputPath);
+    } catch (FileNotFoundException e) {
+      // either the output path is missing or, if its the success file,
+      // somehow the relevant committer wasn't picked up.
+      String dest = outputPath.toString();
+      LOG.error("No _SUCCESS file found under {}", dest);
+      List<String> files = new ArrayList<>();
+      applyLocatedFiles(fs.listFiles(outputPath, true),
+          (status) -> {
+            files.add(status.getPath().toString());
+            LOG.error("{} {}", status.getPath(), status.getLen());
+          });
+      throw new AssertionError("No _SUCCESS file in " + dest
+          + "; found : " + files.stream().collect(Collectors.joining("\n")),
+          e);
+    }
+    String commitDetails = successData.toString();
+    LOG.info("Committer name " + committerName + "\n{}",
+        commitDetails);
+    LOG.info("Committer statistics: \n{}",
+        successData.dumpMetrics("  ", " = ", "\n"));
+    LOG.info("Diagnostics\n{}",
+        successData.dumpDiagnostics("  ", " = ", "\n"));
+    assertEquals("Wrong committer in " + commitDetails,
+        committerName, successData.getCommitter());
+    return successData;
+  }
+
+  /**
+   * Load a success file; fail if the file is empty/nonexistent.
+   * @param fs filesystem
+   * @param outputPath directory containing the success file.
+   * @return the loaded file.
+   * @throws IOException failure to find/load the file
+   * @throws AssertionError file is 0-bytes long
+   */
+  public static SuccessData loadSuccessFile(final S3AFileSystem fs,
+      final Path outputPath) throws IOException {
+    Path success = new Path(outputPath, _SUCCESS);
+    ContractTestUtils.assertIsFile(fs, success);
+    FileStatus status = fs.getFileStatus(success);
+    assertTrue("0 byte success file - not a s3guard committer " + success,
+        status.getLen() > 0);
+    return SuccessData.load(fs, success);
   }
 }
